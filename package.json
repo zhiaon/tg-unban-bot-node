@@ -1,0 +1,10 @@
+{
+  "name": "tg-unban-bot",
+  "version": "1.0.0",
+  "description": "CF-Workers-TGUnbanBot Node.js adapter (runs Workers code on a plain server)",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  }
+}

@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>TG 群管机器人 · 管理面板</title>
+<style>
+/* ===================== 基础重置 ===================== */
+*{
+  margin:0;padding:0;box-sizing:border-box;
+  -webkit-tap-highlight-color:transparent;
+}
+:root{
+  --tg-blue:#0088cc;
+  --tg-blue-dark:#006699;
+  --tg-blue-light:#e3f2fd;
+  --tg-blue-hover:#0099dd;
+  --tg-gradient:linear-gradient(135deg,#0088cc 0%,#004d80 100%);
+  --bg:#f0f2f5;
+  --card:#ffffff;
+  --text:#1a1a1a;
+  --text-sub:#555;
+  --text-light:#999;
+  --border:#e4e7eb;
+  --danger:#e74c3c;
+  --danger-light:#fdeaea;
+  --success:#27ae60;
+  --warn:#f39c12;
+  --radius:14px;
+  --shadow:0 2px 8px rgba(0,0,0,.06);
+  --shadow-hover:0 6px 20px rgba(0,0,0,.1);
+  --transition:all .25s ease;
+}
+
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  min-height:100vh;
+  line-height:1.5;
+  font-size:15px;
+}
+
+/* ===================== 登录页 ===================== */
+.login-wrap{
+  display:flex;align-items:center;justify-content:center;
+  min-height:100vh;padding:24px;
+  background:var(--tg-gradient);
+}
+.login-card{
+  background:#fff;border-radius:22px;padding:40px 28px;
+  width:100%;max-width:360px;
+  box-shadow:0 16px 48px rgba(0,0,0,.2);
+  text-align:center;
+}
+.login-logo{
+  width:72px;height:72px;background:var(--tg-blue);
+  border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:36px;margin:0 auto 20px;
+  box-shadow:0 4px 12px rgba(0,136,204,.3);
+}
+.login-title{font-size:22px;font-weight:700;margin-bottom:6px;color:var(--text)}
+.login-sub{font-size:13px;color:var(--text-light);margin-bottom:32px}
+.input-group{margin-bottom:20px;text-align:left}
+.input-group label{
+  display:block;font-size:13px;color:var(--text-sub);
+  margin-bottom:6px;font-weight:500;
+}
+.input-group input{
+  width:100%;padding:13px 16px;border:1.5px solid var(--border);
+  border-radius:12px;font-size:15px;outline:none;
+  transition:border-color .2s,box-shadow .2s;background:#fff;
+}
+.input-group input:focus{
+  border-color:var(--tg-blue);
+  box-shadow:0 0 0 3px rgba(0,136,204,.12);
+}
+.login-error{
+  color:var(--danger);font-size:13px;text-align:center;
+  margin-bottom:14px;min-height:18px;
+}
+
+/* ===================== 按钮 ===================== */
+.btn{
+  display:block;width:100%;padding:13px;
+  border:none;border-radius:12px;font-size:16px;font-weight:600;
+  cursor:pointer;text-align:center;
+  transition:background .2s,transform .1s,opacity .2s;
+}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:var(--tg-blue);color:#fff}
+.btn-primary:hover{background:var(--tg-blue-hover)}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-danger:hover{background:#c0392b}
+.btn-success{background:var(--success);color:#fff}
+.btn-success:hover{background:#229954}
+.btn-sm{padding:8px 18px;font-size:13px;border-radius:9px;width:auto;display:inline-block}
+.btn-outline{
+  background:transparent;color:var(--tg-blue);
+  border:1.5px solid var(--tg-blue);
+}
+.btn-outline:hover{background:var(--tg-blue-light)}
+.btn-danger-outline{
+  background:transparent;color:var(--danger);
+  border:1.5px solid var(--danger);
+}
+.btn-danger-outline:hover{background:var(--danger-light)}
+
+/* ===================== 主面板 ===================== */
+.panel-header{
+  background:var(--tg-gradient);color:#fff;
+  padding:16px 20px;display:flex;align-items:center;
+  justify-content:space-between;
+  position:sticky;top:0;z-index:100;
+  box-shadow:0 2px 12px rgba(0,0,0,.15);
+}
+.panel-header h1{
+  font-size:18px;font-weight:600;
+  display:flex;align-items:center;gap:8px;
+}
+.header-right{display:flex;align-items:center;gap:8px}
+.refresh-btn,.logout-btn{
+  background:rgba(255,255,255,.18);color:#fff;
+  border:none;padding:6px 14px;border-radius:8px;
+  font-size:13px;cursor:pointer;transition:background .2s;
+}
+.refresh-btn:hover,.logout-btn:hover{background:rgba(255,255,255,.32)}
+
+.panel-content{
+  padding:16px;max-width:640px;
+  margin:0 auto;padding-bottom:40px;
+}
+
+/* ===================== 卡片 ===================== */
+.card{
+  background:var(--card);border-radius:var(--radius);
+  box-shadow:var(--shadow);margin-bottom:14px;
+  overflow:hidden;transition:box-shadow .3s;
+}
+.card:active{box-shadow:var(--shadow-hover)}
+.card-header{
+  display:flex;align-items:center;padding:16px;
+  cursor:pointer;gap:12px;
+  user-select:none;
+}
+.card-icon{
+  font-size:26px;flex-shrink:0;
+  width:46px;height:46px;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--tg-blue-light);border-radius:13px;
+}
+.card-info{flex:1;min-width:0}
+.card-title{font-size:16px;font-weight:600;margin-bottom:2px}
+.card-desc{
+  font-size:12px;color:var(--text-light);
+  white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;
+}
+.card-chevron{
+  color:var(--text-light);font-size:20px;
+  transition:transform .3s;flex-shrink:0;
+  width:28px;height:28px;display:flex;
+  align-items:center;justify-content:center;
+}
+.card.expanded .card-chevron{transform:rotate(180deg)}
+.card-body{
+  max-height:0;overflow:hidden;
+  transition:max-height .4s ease,opacity .3s;
+  opacity:0;
+}
+.card.expanded .card-body{
+  max-height:3000px;opacity:1;
+}
+.card-body-inner{
+  padding:16px;
+  border-top:1px solid var(--border);
+}
+
+/* ===================== 统计网格 ===================== */
+.stat-grid{
+  display:grid;grid-template-columns:repeat(2,1fr);
+  gap:12px;margin-top:4px;
+}
+.stat-item{
+  background:var(--bg);border-radius:12px;
+  padding:18px;text-align:center;
+  transition:transform .2s;
+}
+.stat-item:hover{transform:translateY(-2px)}
+.stat-num{
+  font-size:32px;font-weight:700;
+  color:var(--tg-blue);line-height:1.2;
+}
+.stat-label{font-size:12px;color:var(--text-sub);margin-top:4px}
+
+/* ===================== 列表项 ===================== */
+.list-item{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px;border-radius:10px;
+  background:var(--bg);margin-top:10px;gap:10px;
+}
+.list-item-info{flex:1;min-width:0}
+.list-item-name{font-weight:600;font-size:14px}
+.list-item-meta{
+  font-size:12px;color:var(--text-light);
+  margin-top:3px;word-break:break-all;
+}
+.badge{
+  display:inline-block;padding:2px 8px;
+  border-radius:6px;font-size:11px;font-weight:600;
+  vertical-align:middle;
+}
+.badge-exact{background:#e3f2fd;color:#006699}
+.badge-include{background:#fff3e0;color:#e65100}
+.badge-warn{background:#fff8e1;color:#f57f17}
+
+/* ===================== 标签 ===================== */
+.tag{
+  display:inline-block;padding:4px 10px;
+  border-radius:20px;font-size:12px;margin:3px;
+  background:var(--tg-blue-light);color:var(--tg-blue-dark);
+  font-weight:500;
+}
+.tag-exact{background:#e8f5e9;color:#2e7d32}
+
+/* ===================== 表单 ===================== */
+.input-row{
+  display:flex;gap:8px;margin-top:12px;
+  align-items:center;flex-wrap:wrap;
+}
+.input-row input[type=text],
+.input-row input[type=number]{
+  flex:1;min-width:100px;padding:10px 14px;
+  border:1.5px solid var(--border);border-radius:10px;
+  font-size:14px;outline:none;background:#fff;
+  transition:border-color .2s;
+}
+.input-row input[type=text]:focus,
+.input-row input[type=number]:focus{
+  border-color:var(--tg-blue);
+}
+textarea{
+  width:100%;padding:10px 14px;
+  border:1.5px solid var(--border);border-radius:10px;
+  font-size:14px;outline:none;background:#fff;
+  resize:vertical;min-height:90px;
+  font-family:inherit;line-height:1.6;
+  transition:border-color .2s;
+}
+textarea:focus{border-color:var(--tg-blue)}
+.hint{font-size:12px;color:var(--text-light);margin-top:6px}
+.label-row{
+  font-size:13px;font-weight:600;color:var(--text-sub);
+  margin:14px 0 8px;
+}
+.empty{
+  text-align:center;color:var(--text-light);
+  font-size:13px;padding:24px;
+}
+.action-btns{
+  display:flex;gap:10px;margin-top:14px;
+  flex-wrap:wrap;align-items:center;
+}
+
+/* ===================== 模态框 ===================== */
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.45);
+  z-index:999;display:none;align-items:center;
+  justify-content:center;padding:28px;
+  backdrop-filter:blur(2px);
+}
+.modal-overlay.show{display:flex}
+.modal{
+  background:#fff;border-radius:18px;padding:28px 24px;
+  max-width:320px;width:100%;
+  box-shadow:0 12px 40px rgba(0,0,0,.25);
+  animation:modalIn .25s ease;
+}
+@keyframes modalIn{
+  from{opacity:0;transform:scale(.92) translateY(10px)}
+  to{opacity:1;transform:scale(1) translateY(0)}
+}
+.modal-title{
+  font-size:17px;font-weight:700;
+  margin-bottom:10px;text-align:center;
+}
+.modal-msg{
+  font-size:14px;color:var(--text-sub);
+  text-align:center;margin-bottom:24px;
+  word-break:break-all;
+}
+.modal-btns{display:flex;gap:10px}
+.modal-btns .btn{flex:1;padding:11px}
+
+/* ===================== Toast ===================== */
+.toast{
+  position:fixed;bottom:36px;left:50%;
+  transform:translateX(-50%);
+  background:rgba(0,0,0,.82);color:#fff;
+  padding:10px 26px;border-radius:24px;
+  font-size:14px;z-index:1000;opacity:0;
+  transition:opacity .3s,transform .3s;
+  pointer-events:none;max-width:88%;
+  text-align:center;white-space:nowrap;
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(-6px)}
+.toast.success{background:rgba(39,174,96,.92)}
+.toast.error{background:rgba(231,76,60,.92)}
+
+/* ===================== 加载 ===================== */
+.loading{
+  text-align:center;padding:28px;
+  color:var(--text-light);
+}
+.spinner{
+  width:26px;height:26px;border:3px solid var(--border);
+  border-top-color:var(--tg-blue);border-radius:50%;
+  animation:spin .8s linear infinite;
+  margin:0 auto 8px;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ===================== 选择器 ===================== */
+.match-selector{
+  display:flex;gap:8px;margin-top:8px;
+}
+.match-selector button{
+  flex:1;padding:9px;border:1.5px solid var(--border);
+  border-radius:10px;background:#fff;font-size:13px;
+  cursor:pointer;transition:all .2s;color:var(--text-sub);
+}
+.match-selector button.active{
+  border-color:var(--tg-blue);
+  background:var(--tg-blue-light);
+  color:var(--tg-blue-dark);font-weight:600;
+}
+
+/* ===================== 深色背景适配 ===================== */
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#1a1a2e;
+    --card:#252545;
+    --text:#e0e0e0;
+    --text-sub:#aaa;
+    --text-light:#888;
+    --border:#3a3a5e;
+    --tg-blue-light:rgba(0,136,204,.15);
+  }
+  .login-card{background:#252545;color:var(--text)}
+  .input-group input,.input-row input[type=text],
+  .input-row input[type=number],textarea{
+    background:#1a1a2e;color:var(--text);
+    border-color:var(--border);
+  }
+  .match-selector button{background:#1a1a2e;color:var(--text)}
+  .modal{background:#252545;color:var(--text)}
+  .list-item{background:#1a1a2e}
+  .stat-item{background:#1a1a2e}
+}
+</style>
+</head>
+<body>
+
+<!-- ===== 登录页 ===== -->
+<div id="loginPage" class="login-wrap">
+  <div class="login-card">
+    <div class="login-logo">🤖</div>
+    <div class="login-title">TG 群管机器人</div>
+    <div class="login-sub">请输入管理密钥以登录面板</div>
+    <div id="loginError" class="login-error"></div>
+    <div class="input-group">
+      <label>管理 Token</label>
+      <input type="password" id="tokenInput" placeholder="输入你的访问密钥…" autocomplete="off">
+    </div>
+    <button class="btn btn-primary" id="loginBtn" onclick="doLogin()">🔒 登 录</button>
+  </div>
+</div>
+
+<!-- ===== 主面板 ===== -->
+<div id="panelPage" style="display:none">
+  <div class="panel-header">
+    <h1>🤖 群管面板</h1>
+    <div class="header-right">
+      <button class="refresh-btn" onclick="refreshAll()" title="刷新数据">🔄</button>
+      <button class="logout-btn" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+  <div class="panel-content" id="panelContent"></div>
+</div>
+
+<!-- 模态框 -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal">
+    <div class="modal-title" id="modalTitle">确认</div>
+    <div class="modal-msg" id="modalMsg">确定执行此操作？</div>
+    <div class="modal-btns">
+      <button class="btn btn-outline" onclick="closeModal()">取消</button>
+      <button class="btn btn-danger" id="modalConfirmBtn">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+/* ===================== 全局状态 ===================== */
+var API_BASE = window.location.origin;
+var TOKEN = localStorage.getItem('tg_bot_token') || '';
+var selectedMatchMode = 'include'; // 'exact' | 'include'
+
+/* ===================== 工具函数 ===================== */
+function showToast(msg, type){
+  var t=document.getElementById('toast');
+  t.textContent=msg;
+  t.className='toast'+(type?' '+type:'');
+  setTimeout(function(){t.classList.add('show')},10);
+  setTimeout(function(){t.classList.remove('show')},2600);
+}
+
+function api(path, method, data){
+  var url = API_BASE + '/api/' + path + '?token=' + encodeURIComponent(TOKEN);
+  var opt = {method: method||'GET', headers:{'Content-Type':'application/json'}};
+  if(data) opt.body = JSON.stringify(data);
+  return fetch(url, opt).then(function(r){
+    if(r.status===401){doLogout();throw new Error('未授权');}
+    if(r.status===403){throw new Error('Token 无效');}
+    if(!r.ok)throw new Error('请求失败: '+r.status);
+    return r.json();
+  });
+}
+
+function confirmModal(title, msg, onConfirm){
+  document.getElementById('modalTitle').textContent=title;
+  document.getElementById('modalMsg').textContent=msg;
+  var btn=document.getElementById('modalConfirmBtn');
+  btn.onclick=function(){closeModal();onConfirm();};
+  document.getElementById('modalOverlay').classList.add('show');
+}
+function closeModal(){
+  document.getElementById('modalOverlay').classList.remove('show');
+}
+document.getElementById('modalOverlay').addEventListener('click',function(e){
+  if(e.target===this)closeModal();
+});
+
+function timeAgo(ts){
+  if(!ts)return '—';
+  var d=Date.now()-new Date(ts).getTime();
+  var m=Math.floor(d/60000), h=Math.floor(m/60), day=Math.floor(h/24);
+  if(day>0)return day+'天前';
+  if(h>0)return h+'小时前';
+  if(m>0)return m+'分钟前';
+  return '刚刚';
+}
+
+function escapeHtml(str){
+  if(str==null)return'';
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+/* ===================== 登录 ===================== */
+function doLogin(){
+  var input=document.getElementById('tokenInput').value.trim();
+  var errEl=document.getElementById('loginError');
+  if(!input){errEl.textContent='请输入 Token';return;}
+  errEl.textContent='';
+  TOKEN=input;
+  localStorage.setItem('tg_bot_token',TOKEN);
+  checkToken();
+}
+
+function checkToken(){
+  if(!TOKEN){showLogin();return;}
+  fetch(API_BASE+'/api/overview?token='+encodeURIComponent(TOKEN))
+    .then(function(r){
+      if(r.status===401||r.status===403)throw new Error('无效');
+      return r.json();
+    })
+    .then(function(){showPanel();})
+    .catch(function(){
+      localStorage.removeItem('tg_bot_token');
+      TOKEN='';
+      document.getElementById('loginError').textContent='Token 无效，请重新输入';
+      showLogin();
+    });
+}
+
+function showLogin(){
+  document.getElementById('loginPage').style.display='flex';
+  document.getElementById('panelPage').style.display='none';
+}
+
+function showPanel(){
+  document.getElementById('loginPage').style.display='none';
+  document.getElementById('panelPage').style.display='block';
+  renderPanel();
+}
+
+function doLogout(){
+  localStorage.removeItem('tg_bot_token');
+  TOKEN='';
+  showLogin();
+  document.getElementById('tokenInput').value='';
+  document.getElementById('loginError').textContent='';
+}
+
+/* ===================== 面板渲染 ===================== */
+function renderPanel(){
+  var c=document.getElementById('panelContent');
+  c.innerHTML =
+    cardTpl('overview','📊','概览统计','加载中…')+
+    cardTpl('banned','🚫','违禁词管理','加载中…')+
+    cardTpl('warnings','⚠️','警告记录','加载中…')+
+    cardTpl('blacklist','📋','联网黑名单','加载中…')+
+    cardTpl('settings','⚙️','Bot 设置','加载中…');
+  loadAll();
+}
+
+function cardTpl(id,icon,title,desc){
+  return '<div class="card" id="card-'+id+'">'+
+    '<div class="card-header" onclick="toggleCard(\''+id+'\')">'+
+      '<div class="card-icon">'+icon+'</div>'+
+      '<div class="card-info">'+
+        '<div class="card-title">'+title+'</div>'+
+        '<div class="card-desc" id="desc-'+id+'">'+desc+'</div>'+
+      '</div>'+
+      '<div class="card-chevron">⌄</div>'+
+    '</div>'+
+    '<div class="card-body"><div class="card-body-inner" id="body-'+id+'"></div></div>'+
+  '</div>';
+}
+
+function toggleCard(id){
+  var c=document.getElementById('card-'+id);
+  c.classList.toggle('expanded');
+}
+
+/* ===================== 概览 ===================== */
+function loadOverview(){
+  document.getElementById('body-overview').innerHTML='<div class="loading"><div class="spinner"></div>加载中…</div>';
+  api('overview').then(function(d){
+    document.getElementById('desc-overview').textContent=
+      d.userCount+' 用户 · '+d.warningCount+' 警告 · '+d.blacklistedCount+' 黑名单';
+    document.getElementById('body-overview').innerHTML=
+      '<div class="stat-grid">'+
+        statItem(d.userCount,'👥 群用户')+
+        statItem(d.messageCount,'💬 消息数')+
+        statItem(d.warningCount,'⚠️ 警告数')+
+        statItem(d.blacklistedCount,'🚫 黑名单')+
+      '</div>'+
+      '<div class="hint" style="margin-top:10px">📡 数据实时反映当前群组状态</div>';
+  }).catch(function(){showCardError('overview');});
+}
+
+function statItem(num,label){
+  return '<div class="stat-item">'+
+    '<div class="stat-num">'+(num!=null?num:'—')+'</div>'+
+    '<div class="stat-label">'+label+'</div>'+
+  '</div>';
+}
+
+function showCardError(id){
+  document.getElementById('body-'+id).innerHTML='<div class="empty">⚠️ 数据加载失败，请检查网络连接</div>';
+}
+
+/* ===================== 违禁词管理 ===================== */
+function loadBannedWords(){
+  document.getElementById('body-banned').innerHTML='<div class="loading"><div class="spinner"></div>加载中…</div>';
+  api('banned-words').then(function(words){
+    document.getElementById('desc-banned').textContent='共 '+words.length+' 个违禁词';
+    var html='';
+
+    // 添加区域
+    html+='<div class="label-row">➕ 添加违禁词</div>';
+    html+='<div class="input-row">';
+    html+='<input type="text" id="newWord" placeholder="输入违禁词">';
+    html+='</div>';
+    html+='<div class="match-selector">';
+    html+='<button id="modeInclude" class="'+(selectedMatchMode==='include'?'active':'')+'" onclick="setMatchMode(\'include\')">🔍 包含匹配</button>';
+    html+='<button id="modeExact" class="'+(selectedMatchMode==='exact'?'active':'')+'" onclick="setMatchMode(\'exact\')">🎯 精确匹配</button>';
+    html+='</div>';
+    html+='<div class="input-row"><button class="btn btn-primary btn-sm" onclick="addWord()">添加违禁词</button></div>';
+    html+='<div class="hint">💡 包含匹配：消息中包含该词即触发。精确匹配：用双引号包裹，如 "签到"。</div>';
+
+    // 列表区域
+    html+='<div class="label-row" style="margin-top:18px">📋 当前违禁词（'+words.length+'）</div>';
+    if(words.length===0){
+      html+='<div class="empty">暂无违禁词</div>';
+    } else {
+      html+='<div>';
+      words.forEach(function(w){
+        var word=typeof w==='string'?w:(w.word||'');
+        var isExact=typeof w==='string'?false:(w.isExact||w.type==='exact');
+        html+='<span class="tag '+(isExact?'tag-exact':'')+'">';
+        html+=escapeHtml(word);
+        html+=' <span class="badge '+(isExact?'badge-exact':'badge-include')+'">'+(isExact?'精确':'包含')+'</span>';
+        html+='</span>';
+      });
+      html+='</div>';
+    }
+
+    // 删除区域
+    html+='<div class="label-row" style="margin-top:18px">🗑️ 删除违禁词</div>';
+    html+='<div class="input-row">';
+    html+='<input type="text" id="delWord" placeholder="输入要删除的词">';
+    html+='<button class="btn btn-danger btn-sm" onclick="delWord()">删除</button>';
+    html+='</div>';
+
+    document.getElementById('body-banned').innerHTML=html;
+  }).catch(function(){showCardError('banned');});
+}
+
+function setMatchMode(mode){
+  selectedMatchMode=mode;
+  document.getElementById('modeInclude').className=mode==='include'?'active':'';
+  document.getElementById('modeExact').className=mode==='exact'?'active':'';
+}
+
+function addWord(){
+  var el=document.getElementById('newWord');
+  var raw=el.value.trim();
+  if(!raw){showToast('请输入违禁词','error');return;}
+  // 如果选择了精确匹配模式且没有双引号，自动加上
+  var word=raw;
+  if(selectedMatchMode==='exact'&&!raw.startsWith('"')){
+    word='"'+raw+'"';
+  }
+  api('banned-words','POST',{action:'add',word:word}).then(function(){
+    el.value='';
+    showToast('✅ 已添加违禁词','success');
+    loadBannedWords();
+  }).catch(function(){showToast('添加失败','error');});
+}
+
+function delWord(){
+  var el=document.getElementById('delWord');
+  var word=el.value.trim();
+  if(!word){showToast('请输入要删除的词','error');return;}
+  confirmModal('删除违禁词','确定删除违禁词 "'+word+'" 吗？',function(){
+    api('banned-words','POST',{action:'delete',word:word}).then(function(){
+      el.value='';
+      showToast('已删除','success');
+      loadBannedWords();
+    }).catch(function(){showToast('删除失败','error');});
+  });
+}
+
+/* ===================== 警告记录 ===================== */
+function loadWarnings(){
+  document.getElementById('body-warnings').innerHTML='<div class="loading"><div class="spinner"></div>加载中…</div>';
+  api('warnings').then(function(list){
+    document.getElementById('desc-warnings').textContent='共 '+list.length+' 个用户有警告';
+    var html='<div class="label-row">⚠️ 警告用户列表</div>';
+    if(list.length===0){
+      html+='<div class="empty">暂无警告记录 🎉</div>';
+    } else {
+      list.forEach(function(u){
+        html+='<div class="list-item">';
+        html+='<div class="list-item-info">';
+        html+='<div class="list-item-name">'+escapeHtml(u.firstName||'用户');
+        html+=' <span class="badge badge-warn">'+u.warnings+' 次</span></div>';
+        html+='<div class="list-item-meta">ID: '+u.tgid;
+        if(u.lastActive)html+=' · 最近活跃: '+timeAgo(u.lastActive);
+        html+='</div></div>';
+        html+='<button class="btn btn-outline btn-sm" onclick="clearUserWarning(\''+u.tgid+'\')">清除</button>';
+        html+='</div>';
+      });
+      html+='<div class="action-btns">';
+      html+='<button class="btn btn-danger btn-sm" onclick="clearAllWarnings()">⚠️ 清除全部警告</button>';
+      html+='</div>';
+    }
+    document.getElementById('body-warnings').innerHTML=html;
+  }).catch(function(){showCardError('warnings');});
+}
+
+function clearUserWarning(tgid){
+  confirmModal('清除警告','确定清除该用户的全部警告吗？',function(){
+    api('warnings','POST',{action:'clearUser',tgid:tgid}).then(function(){
+      showToast('已清除该用户警告','success');
+      loadWarnings();
+      loadOverview();
+    }).catch(function(){showToast('操作失败','error');});
+  });
+}
+
+function clearAllWarnings(){
+  confirmModal('清除全部警告','⚠️ 此操作将清除所有用户的警告记录，确定继续吗？',function(){
+    api('warnings','POST',{action:'clearAll'}).then(function(){
+      showToast('已清除全部警告','success');
+      loadWarnings();
+      loadOverview();
+    }).catch(function(){showToast('操作失败','error');});
+  });
+}
+
+/* ===================== 联网黑名单 ===================== */
+function loadBlacklist(){
+  document.getElementById('body-blacklist').innerHTML='<div class="loading"><div class="spinner"></div>加载中…</div>';
+  api('blacklist').then(function(list){
+    document.getElementById('desc-blacklist').textContent='共 '+list.length+' 个黑名单用户';
+    var html='<div class="label-row">🚫 黑名单用户列表</div>';
+    if(list.length===0){
+      html+='<div class="empty">黑名单为空 ✨</div>';
+    } else {
+      list.forEach(function(u){
+        html+='<div class="list-item">';
+        html+='<div class="list-item-info">';
+        html+='<div class="list-item-name">'+escapeHtml(u.firstName||'用户')+'</div>';
+        html+='<div class="list-item-meta">ID: '+u.tgid;
+        if(u.reason)html+=' · 原因: '+escapeHtml(u.reason);
+        if(u.bannedAt)html+=' · '+timeAgo(u.bannedAt);
+        html+='</div></div>';
+        html+='<button class="btn btn-danger btn-sm" onclick="removeFromBlacklist(\''+u.tgid+'\')">移除</button>';
+        html+='</div>';
+      });
+    }
+    document.getElementById('body-blacklist').innerHTML=html;
+  }).catch(function(){showCardError('blacklist');});
+}
+
+function removeFromBlacklist(tgid){
+  confirmModal('移除黑名单','确定将该用户从黑名单中移除吗？移除后该用户可以正常入群。',function(){
+    api('blacklist','POST',{action:'remove',tgid:tgid}).then(function(){
+      showToast('已从黑名单移除','success');
+      loadBlacklist();
+      loadOverview();
+    }).catch(function(){showToast('操作失败','error');});
+  });
+}
+
+/* ===================== Bot 设置 ===================== */
+function loadSettings(){
+  document.getElementById('body-settings').innerHTML='<div class="loading"><div class="spinner"></div>加载中…</div>';
+  api('settings').then(function(s){
+    document.getElementById('desc-settings').textContent=
+      '警告上限: '+(s.warningLimit||3)+' · 删除延迟: '+(s.autoDeleteDelay||0)+'s';
+    var html='';
+
+    html+='<div class="label-row">⚠️ 警告上限</div>';
+    html+='<div class="input-row">';
+    html+='<input type="number" id="setWarnLimit" value="'+(s.warningLimit||3)+'" min="1" max="10">';
+    html+='<span class="hint">达到上限自动封禁</span>';
+    html+='</div>';
+
+    html+='<div class="label-row">⏱️ 自动删除延迟（秒）</div>';
+    html+='<div class="input-row">';
+    html+='<input type="number" id="setAutoDelay" value="'+(s.autoDeleteDelay||0)+'" min="0" max="300">';
+    html+='<span class="hint">0 = 立即删除</span>';
+    html+='</div>';
+
+    html+='<div class="label-row">📋 群规文本</div>';
+    html+='<textarea id="setRules" placeholder="输入群规文本…">'+escapeHtml(s.groupRules||'')+'</textarea>';
+    html+='<div class="hint">新成员入群时自动发送此消息</div>';
+
+    html+='<div class="action-btns">';
+    html+='<button class="btn btn-success btn-sm" onclick="saveSettings()">💾 保存设置</button>';
+    html+='</div>';
+
+    document.getElementById('body-settings').innerHTML=html;
+  }).catch(function(){showCardError('settings');});
+}
+
+function saveSettings(){
+  var data={
+    warningLimit:parseInt(document.getElementById('setWarnLimit').value)||3,
+    autoDeleteDelay:parseInt(document.getElementById('setAutoDelay').value)||0,
+    groupRules:document.getElementById('setRules').value
+  };
+  api('settings','POST',data).then(function(){
+    showToast('✅ 设置已保存','success');
+    loadSettings();
+    loadOverview();
+  }).catch(function(){showToast('保存失败','error');});
+}
+
+/* ===================== 刷新全部 ===================== */
+function loadAll(){
+  loadOverview();
+  loadBannedWords();
+  loadWarnings();
+  loadBlacklist();
+  loadSettings();
+}
+
+function refreshAll(){
+  showToast('🔄 正在刷新…','success');
+  loadAll();
+}
+
+/* ===================== 初始化 ===================== */
+(function(){
+  // 支持 ?server=http://xxx:port 指定后端地址
+  var params=new URLSearchParams(location.search);
+  var sv=params.get('server');
+  if(sv)API_BASE=sv.replace(/\/+$/,'');
+  checkToken();
+  // 回车登录
+  document.getElementById('tokenInput').addEventListener('keydown',function(e){
+    if(e.key==='Enter')doLogin();
+  });
+})();
+</script>
+</body>
+</html>
