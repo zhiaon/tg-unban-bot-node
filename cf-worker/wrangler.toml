@@ -1,0 +1,62 @@
+name = "tg-unban-bot"
+main = "_worker.js"
+compatibility_date = "2025-10-01"
+compatibility_flags = ["nodejs_compat"]
+keep_vars = true
+
+# ============================================================
+# TG Unban Bot — Cloudflare Workers 部署配置
+#
+# 基于 cmliu/CF-Workers-TGUnbanBot 改造
+# 原作者: cmliu (https://github.com/cmliu)
+# ============================================================
+
+# KV 命名空间（可选：数据库版下作为旧数据迁移源）
+# 创建: wrangler kv namespace create KV
+# [[kv_namespaces]]
+# binding = "KV"
+# id = "你的 KV namespace id"
+
+# D1 数据库（推荐）
+# 创建: wrangler d1 create tg-unban-bot
+[[d1_databases]]
+binding = "DB"
+database_name = "tg-unban-bot"
+database_id = "你的 D1 database_id"
+
+# Workers AI 绑定（用于 /ad 举报内容威胁评级）
+[ai]
+binding = "AI"
+
+# Cron 定时任务：每 5 分钟扫描一次临时封禁解封队列
+[triggers]
+crons = ["*/5 * * * *"]
+
+# 可观测性日志
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
+
+# ============================================================
+# 环境变量（用 wrangler secret put 设置敏感变量）
+#   wrangler secret put TOKEN        # 初始化入口密钥
+#   wrangler secret put BOT_TOKEN    # Telegram Bot Token
+#   wrangler secret put GROUP_ID     # 群组 ID
+#
+# 可选变量（明文写在 [vars] 也可）：
+#   AD_GROUP_RULES       /ad 评级群规
+#   AD_VOTE_THRESHOLD    /ad 回退票数
+#   AD_AI_MODEL          /ad 模型列表
+#   AD_AI_TIMEOUT_MS     AI 调用超时
+# ============================================================
