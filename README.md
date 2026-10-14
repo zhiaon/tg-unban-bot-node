@@ -14,16 +14,32 @@ Telegram 群组自助解封 + 违禁词管理 + 自动回复机器人。
 
 ## 与原版的区别
 
-| 特性 | 原版 (CF Workers) | 本项目 (Node.js 服务器版) |
-|------|------------------|------------------------|
-| 部署 | Cloudflare Workers | 任意 Linux 服务器 + Node.js |
-| 存储 | CF KV / D1 | SQLite（本地文件） |
-| AI 评级 | Workers AI | DeepSeek API（可选） |
+| 特性 | 原版 (CF Workers) | 本项目 |
+|------|------------------|--------|
+| 部署 | 仅 Cloudflare Workers | **双版本：CF Workers + Node.js 服务器** |
+| 存储 | CF KV / D1 | CF: KV/D1 · Node: SQLite |
+| AI 评级 | Workers AI | CF: Workers AI · Node: DeepSeek API |
 | 违禁词 | ❌ | ✅ 支持精确/包含匹配、单个词独立规则 |
 | 自动回复 | ❌ | ✅ 关键词触发 |
 | Web 管理面板 | ❌ | ✅ 移动端友好的网页面板 |
 | 面板按钮 | ❌ | ✅ Telegram 内联按钮面板 |
 | 群 ID 管理 | ❌ | ✅ 动态添加/删除群 |
+
+## 两个版本
+
+仓库提供两套部署方式，功能一致，按需选择：
+
+### 🇨🇫 Cloudflare Workers 版 → [`cf-worker/`](cf-worker/)
+- 单文件 `_worker.js` + `wrangler.toml`
+- 免费、免服务器、全球加速
+- 定时任务用 Cron Trigger
+- 部署文档见 [cf-worker/README.md](cf-worker/README.md)
+
+### 🖥 Node.js 服务器版 → 根目录
+- `server.js` 适配层 + `_worker.js`
+- 适合自有服务器（VPS/家宽）
+- 定时任务用 `setTimeout`
+- 部署文档见下文
 
 ## 功能
 
@@ -148,11 +164,15 @@ unban.example.com {
 
 ```
 .
-├── _worker.js      # Worker 主程序（业务逻辑）
+├── _worker.js      # 业务主程序（Node.js 版）
 ├── server.js       # Node.js 适配层（KV/D1/AI 绑定 shim + HTTP 服务）
 ├── panel.html      # Web 管理面板
 ├── package.json    # 依赖配置
-└── README.md       # 本文件
+├── README.md       # 本文件
+└── cf-worker/      # Cloudflare Workers 版
+    ├── _worker.js      # 业务主程序（CF 版）
+    ├── wrangler.toml   # CF 部署配置
+    └── README.md       # CF 部署文档
 ```
 
 ## 许可
