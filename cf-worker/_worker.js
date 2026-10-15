@@ -3875,6 +3875,7 @@ async function checkBannedWords(message, env) {
 
 	const userLabel = `@${username}`;
 	const displayWord = matchedWord.startsWith('"') && matchedWord.endsWith('"') ? matchedWord.slice(1, -1) : matchedWord;
+	const displayWords = matchedWords.map(w => w.startsWith('"') && w.endsWith('"') ? w.slice(1, -1) : w);
 
 	if (newCount >= limit) {
 		// 达到上限，执行处罚
