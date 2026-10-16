@@ -2922,11 +2922,9 @@ async function handleMessage(message, env) {
 				const display = w.startsWith('"') && w.endsWith('"') ? w.slice(1, -1) : w;
 				const keyboard = {
 					inline_keyboard: [
-						[
-							{ text: '🔇 禁言', callback_data: `bw:t:mute:${w}` },
-							{ text: '👢 踢出', callback_data: `bw:t:kick:${w}` },
-							{ text: '🔨 封禁+拉黑', callback_data: `bw:t:ban:${w}` },
-						]
+						[{ text: '🔇 禁言', callback_data: `bw:t:mute:${w}` }],
+						[{ text: '👢 踢出', callback_data: `bw:t:kick:${w}` }],
+						[{ text: '🔨 封禁+拉黑', callback_data: `bw:t:ban:${w}` }]
 					]
 				};
 				const skipText = skipped.length > 0 ? `\n⚠️ 已存在(跳过): ${skipped.map(s => '<code>' + escapeHtml(s) + '</code>').join(', ')}` : '';
@@ -6610,11 +6608,9 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' },
 					{ text: (eWarn === 10 ? '🔘' : '⚪') + ' 10次', callback_data: 'pnl:bwrs:' + idx + ':warn:10' }
 				],
-				[
-					{ text: (ePunish === 'mute' ? '🔘' : '⚪') + ' 🔇 禁言', callback_data: 'pnl:bwrs:' + idx + ':type:mute' },
-					{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 👢 踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' },
-					{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 🔨 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }
-				],
+				[{ text: (ePunish === 'mute' ? '🔘' : '⚪') + ' 🔇 禁言', callback_data: 'pnl:bwrs:' + idx + ':type:mute' }],
+				[{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 👢 踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' }],
+				[{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 🔨 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }],
 				[
 					{ text: (eBanDur === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwrs:' + idx + ':dur:0' },
 					{ text: (eBanDur === 300 ? '🔘' : '⚪') + ' 5分钟', callback_data: 'pnl:bwrs:' + idx + ':dur:300' },
@@ -6688,11 +6684,9 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' },
 					{ text: (eWarn === 10 ? '🔘' : '⚪') + ' 10次', callback_data: 'pnl:bwrs:' + idx + ':warn:10' }
 				],
-				[
-					{ text: (ePunish === 'mute' ? '🔘' : '⚪') + ' 🔇 禁言', callback_data: 'pnl:bwrs:' + idx + ':type:mute' },
-					{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 👢 踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' },
-					{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 🔨 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }
-				],
+				[{ text: (ePunish === 'mute' ? '🔘' : '⚪') + ' 🔇 禁言', callback_data: 'pnl:bwrs:' + idx + ':type:mute' }],
+				[{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 👢 踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' }],
+				[{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 🔨 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }],
 				[
 					{ text: (eBanDur === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwrs:' + idx + ':dur:0' },
 					{ text: (eBanDur === 300 ? '🔘' : '⚪') + ' 5分钟', callback_data: 'pnl:bwrs:' + idx + ':dur:300' },
