@@ -6502,39 +6502,19 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					const rule = rules[w];
 					let ruleTag = '';
 					if (rule) {
-						const pt = rule.punishType === 'ban' ? '封禁' : '踢出';
+						const pt = rule.punishType === 'mute' ? '🔇禁言' : rule.punishType === 'ban' ? '🔨封禁' : '👢踢出';
 						const dl = rule.banDuration > 0 ? `临时${Math.round(rule.banDuration / 60)}分钟` : '永久';
-						ruleTag = ` | ${pt} ${dl} | ${rule.warningLimit || config.warningLimit || WORD_WARNING_LIMIT}次`;
+						ruleTag = ` | ${pt} ${dl} | ${rule.warningLimit || 3}次`;
+					} else {
+						ruleTag = ` | 默认(踢出 3次)`;
 					}
 					return `${i + 1}. <code>${escapeHtml(display)}</code> [${label}匹配]${ruleTag}`;
 				}).join('\n');
-			const punishText = config.punishType === 'ban' ? '封禁+拉黑' : '仅踢出';
-			const durationText = config.banDuration > 0 ? `临时${Math.round(config.banDuration / 60)}分钟` : '永久';
 			const msg = '🚫 <b>违禁词管理</b>\n\n' +
-				'<b>全局配置:</b>\n' +
-				'状态: ' + (config.enabled ? '✅ 启用' : '❌ 关闭') + '\n' +
-				'警告上限: <b>' + (config.warningLimit || WORD_WARNING_LIMIT) + '</b> 次\n' +
-				'处罚方式: <b>' + punishText + '</b>\n' +
-				'处罚时长: <b>' + durationText + '</b>\n\n' +
 				'<b>违禁词列表:</b>\n' + wordList + '\n\n' +
 				'💡 点击下方按钮可设置单个违禁词规则\n' +
 				'添加: /addwords 词1,词2  删除: /delwords 词';
 			const buttons = [];
-			if (config.enabled) {
-				buttons.push([{ text: '🔴 关闭违禁词', callback_data: 'pnl:bwcfg:off' }]);
-			} else {
-				buttons.push([{ text: '🟢 启用违禁词', callback_data: 'pnl:bwcfg:on' }]);
-			}
-			buttons.push([
-				{ text: (config.punishType === 'kick' ? '🔘' : '⚪') + ' 仅踢出', callback_data: 'pnl:bwcfg:type:kick' },
-				{ text: (config.punishType === 'ban' ? '🔘' : '⚪') + ' 封禁+拉黑', callback_data: 'pnl:bwcfg:type:ban' }
-			]);
-			buttons.push([
-				{ text: (config.banDuration === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwcfg:dur:0' },
-				{ text: (config.banDuration === 300 ? '🔘' : '⚪') + ' 5分钟', callback_data: 'pnl:bwcfg:dur:300' },
-				{ text: (config.banDuration === 1800 ? '🔘' : '⚪') + ' 30分钟', callback_data: 'pnl:bwcfg:dur:1800' },
-				{ text: (config.banDuration === 86400 ? '🔘' : '⚪') + ' 1天', callback_data: 'pnl:bwcfg:dur:86400' }
-			]);
 			// 每个违禁词一个设置按钮
 			if (words.length > 0) {
 				const wordButtons = words.map((w, i) => {
@@ -6614,23 +6594,26 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			const ePunish = rule.punishType || config.punishType || 'kick';
 			const eBanDur = rule.banDuration !== undefined ? rule.banDuration : config.banDuration;
 			const eWarn = rule.warningLimit || config.warningLimit || WORD_WARNING_LIMIT;
+			const punishLabel = ePunish === 'mute' ? '🔇 禁言' : ePunish === 'ban' ? '🔨 封禁+拉黑' : '👢 踢出';
 			const msg = '⚙️ <b>违禁词设置</b>\n\n' +
 				'词汇: <code>' + escapeHtml(display) + '</code>\n' +
 				'匹配: ' + (word.startsWith('"') ? '精确' : '包含') + '\n' +
-				(hasCustom ? '⚡ 使用独立规则' : '📋 使用全局默认') + '\n\n' +
-				'警告上限: <b>' + eWarn + '</b> 次\n' +
-				'处罚方式: <b>' + (ePunish === 'ban' ? '封禁+拉黑' : '仅踢出') + '</b>\n' +
+				(hasCustom ? '⚡ 使用独立规则' : '📋 未设置(默认踢出3次)') + '\n\n' +
+				'触发次数: <b>' + eWarn + '</b> 次\n' +
+				'处罚方式: <b>' + punishLabel + '</b>\n' +
 				'处罚时长: <b>' + (eBanDur > 0 ? '临时' + Math.round(eBanDur / 60) + '分钟' : '永久') + '</b>';
 			const buttons = [
 				[
 					{ text: (eWarn === 1 ? '🔘' : '⚪') + ' 1次', callback_data: 'pnl:bwrs:' + idx + ':warn:1' },
 					{ text: (eWarn === 2 ? '🔘' : '⚪') + ' 2次', callback_data: 'pnl:bwrs:' + idx + ':warn:2' },
 					{ text: (eWarn === 3 ? '🔘' : '⚪') + ' 3次', callback_data: 'pnl:bwrs:' + idx + ':warn:3' },
-					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' }
+					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' },
+					{ text: (eWarn === 10 ? '🔘' : '⚪') + ' 10次', callback_data: 'pnl:bwrs:' + idx + ':warn:10' }
 				],
 				[
-					{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 仅踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' },
-					{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }
+					{ text: (ePunish === 'mute' ? '🔘' : '⚪') + ' 🔇 禁言', callback_data: 'pnl:bwrs:' + idx + ':type:mute' },
+					{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 👢 踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' },
+					{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 🔨 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }
 				],
 				[
 					{ text: (eBanDur === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwrs:' + idx + ':dur:0' },
@@ -6640,7 +6623,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				]
 			];
 			if (hasCustom) {
-				buttons.push([{ text: '🗑 恢复全局默认', callback_data: 'pnl:bwrs:' + idx + ':reset' }]);
+				buttons.push([{ text: '🗑 清除规则', callback_data: 'pnl:bwrs:' + idx + ':reset' }]);
 			}
 			buttons.push([{ text: '⬅️ 返回违禁词列表', callback_data: 'pnl:words' }]);
 			const markup = { inline_keyboard: buttons };
@@ -6671,7 +6654,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			} else if (subAction === 'warn' && parts[4]) {
 				const w = parseInt(parts[4]);
 				if (w >= 1 && w <= 10) { rule.warningLimit = w; changed = true; }
-			} else if (subAction === 'type' && (parts[4] === 'kick' || parts[4] === 'ban')) {
+			} else if (subAction === 'type' && (parts[4] === 'mute' || parts[4] === 'kick' || parts[4] === 'ban')) {
 				rule.punishType = parts[4]; changed = true;
 			} else if (subAction === 'dur' && parts[4]) {
 				rule.banDuration = parseInt(parts[4]); changed = true;
@@ -6689,23 +6672,26 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			const ePunish = newRule.punishType || config.punishType || 'kick';
 			const eBanDur = newRule.banDuration !== undefined ? newRule.banDuration : config.banDuration;
 			const eWarn = newRule.warningLimit || config.warningLimit || WORD_WARNING_LIMIT;
+			const punishLabel = ePunish === 'mute' ? '🔇 禁言' : ePunish === 'ban' ? '🔨 封禁+拉黑' : '👢 踢出';
 			const msg = '⚙️ <b>违禁词设置</b>\n\n' +
 				'词汇: <code>' + escapeHtml(display) + '</code>\n' +
 				'匹配: ' + (word.startsWith('"') ? '精确' : '包含') + '\n' +
-				(hasCustom ? '⚡ 使用独立规则' : '📋 使用全局默认') + '\n\n' +
-				'警告上限: <b>' + eWarn + '</b> 次\n' +
-				'处罚方式: <b>' + (ePunish === 'ban' ? '封禁+拉黑' : '仅踢出') + '</b>\n' +
+				(hasCustom ? '⚡ 使用独立规则' : '📋 未设置(默认踢出3次)') + '\n\n' +
+				'触发次数: <b>' + eWarn + '</b> 次\n' +
+				'处罚方式: <b>' + punishLabel + '</b>\n' +
 				'处罚时长: <b>' + (eBanDur > 0 ? '临时' + Math.round(eBanDur / 60) + '分钟' : '永久') + '</b>';
 			const buttons = [
 				[
 					{ text: (eWarn === 1 ? '🔘' : '⚪') + ' 1次', callback_data: 'pnl:bwrs:' + idx + ':warn:1' },
 					{ text: (eWarn === 2 ? '🔘' : '⚪') + ' 2次', callback_data: 'pnl:bwrs:' + idx + ':warn:2' },
 					{ text: (eWarn === 3 ? '🔘' : '⚪') + ' 3次', callback_data: 'pnl:bwrs:' + idx + ':warn:3' },
-					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' }
+					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' },
+					{ text: (eWarn === 10 ? '🔘' : '⚪') + ' 10次', callback_data: 'pnl:bwrs:' + idx + ':warn:10' }
 				],
 				[
-					{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 仅踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' },
-					{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }
+					{ text: (ePunish === 'mute' ? '🔘' : '⚪') + ' 🔇 禁言', callback_data: 'pnl:bwrs:' + idx + ':type:mute' },
+					{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 👢 踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' },
+					{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 🔨 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }
 				],
 				[
 					{ text: (eBanDur === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwrs:' + idx + ':dur:0' },
@@ -6715,7 +6701,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				]
 			];
 			if (hasCustom) {
-				buttons.push([{ text: '🗑 恢复全局默认', callback_data: 'pnl:bwrs:' + idx + ':reset' }]);
+				buttons.push([{ text: '🗑 清除规则', callback_data: 'pnl:bwrs:' + idx + ':reset' }]);
 			}
 			buttons.push([{ text: '⬅️ 返回违禁词列表', callback_data: 'pnl:words' }]);
 			const markup = { inline_keyboard: buttons };
@@ -6766,41 +6752,12 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					const display = isExact ? w.slice(1, -1) : w;
 					return `${i + 1}. <code>${escapeHtml(display)}</code> [${label}匹配]`;
 				}).join('\n');
-			const punishText = config.punishType === 'ban' ? '封禁+拉黑' : '仅踢出';
-			const durationText = config.banDuration > 0 ? `临时${Math.round(config.banDuration / 60)}分钟` : '永久';
 			const msg = '🚫 <b>违禁词管理</b>\n\n' +
-				'<b>当前配置:</b>\n' +
-				'状态: ' + (config.enabled ? '✅ 启用' : '❌ 关闭') + '\n' +
-				'警告上限: <b>' + (config.warningLimit || WORD_WARNING_LIMIT) + '</b> 次\n' +
-				'处罚方式: <b>' + punishText + '</b>\n' +
-				'处罚时长: <b>' + durationText + '</b>\n\n' +
 				'<b>违禁词列表:</b>\n' + wordList + '\n\n' +
-				'添加: /addwords 词1,词2\n删除: /delwords 词';
+				'💡 点击下方按钮可设置单个违禁词规则\n' +
+				'添加: /addwords 词1,词2  删除: /delwords 词';
 			const buttons = [];
-			if (config.enabled) {
-				buttons.push([{ text: '🔴 关闭违禁词', callback_data: 'pnl:bwcfg:off' }]);
-			} else {
-				buttons.push([{ text: '🟢 启用违禁词', callback_data: 'pnl:bwcfg:on' }]);
-			}
-			const wl = config.warningLimit || WORD_WARNING_LIMIT;
-			buttons.push([
-				{ text: (wl === 1 ? '🔘' : '⚪') + ' 1次', callback_data: 'pnl:bwcfg:warn:1' },
-				{ text: (wl === 2 ? '🔘' : '⚪') + ' 2次', callback_data: 'pnl:bwcfg:warn:2' },
-				{ text: (wl === 3 ? '🔘' : '⚪') + ' 3次', callback_data: 'pnl:bwcfg:warn:3' },
-				{ text: (wl === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwcfg:warn:5' },
-				{ text: (wl === 10 ? '🔘' : '⚪') + ' 10次', callback_data: 'pnl:bwcfg:warn:10' }
-			]);
-			buttons.push([
-				{ text: (config.punishType === 'kick' ? '🔘' : '⚪') + ' 仅踢出', callback_data: 'pnl:bwcfg:type:kick' },
-				{ text: (config.punishType === 'ban' ? '🔘' : '⚪') + ' 封禁+拉黑', callback_data: 'pnl:bwcfg:type:ban' }
-			]);
-			buttons.push([
-				{ text: (config.banDuration === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwcfg:dur:0' },
-				{ text: (config.banDuration === 300 ? '🔘' : '⚪') + ' 5分钟', callback_data: 'pnl:bwcfg:dur:300' },
-				{ text: (config.banDuration === 1800 ? '🔘' : '⚪') + ' 30分钟', callback_data: 'pnl:bwcfg:dur:1800' },
-				{ text: (config.banDuration === 86400 ? '🔘' : '⚪') + ' 1天', callback_data: 'pnl:bwcfg:dur:86400' }
-			]);
-			buttons.push(backButton);
+			// 每个违禁词一个设置按钮
 			const markup = { inline_keyboard: buttons };
 			if (message) await editMessageText(chatId, message.message_id, msg, markup);
 			else await sendTelegramMessage(chatId, msg, markup);
