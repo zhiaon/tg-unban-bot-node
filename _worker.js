@@ -1750,9 +1750,12 @@ export default {
 					if (!consumed) {
 						const consumed2 = await handleClearWarnCallbackQuery(update.callback_query, env);
 						if (!consumed2) {
-							const consumed3 = await handlePanelCallbackQuery(update.callback_query, env);
+							const consumed3 = await handleBannedWordCallbackQuery(update.callback_query, env);
 							if (!consumed3) {
-								await handleAdCallbackQuery(update.callback_query, env);
+								const consumed4 = await handlePanelCallbackQuery(update.callback_query, env);
+								if (!consumed4) {
+									await handleAdCallbackQuery(update.callback_query, env);
+								}
 							}
 						}
 					}
@@ -2913,12 +2916,29 @@ async function handleMessage(message, env) {
 			}
 		}
 		await saveBannedWords(env, current);
-		let msg = `✅ 已添加违禁词: ${added.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
-		if (skipped.length > 0) {
-			msg += `\n⚠️ 已存在(跳过): ${skipped.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
+		if (added.length > 0) {
+			// 为每个新添加的词显示处罚方式选择按钮
+			for (const w of added) {
+				const display = w.startsWith('"') && w.endsWith('"') ? w.slice(1, -1) : w;
+				const keyboard = {
+					inline_keyboard: [
+						[
+							{ text: '🔇 禁言', callback_data: `bw:t:mute:${w}` },
+							{ text: '👢 踢出', callback_data: `bw:t:kick:${w}` },
+							{ text: '🔨 封禁+拉黑', callback_data: `bw:t:ban:${w}` },
+						]
+					]
+				};
+				const skipText = skipped.length > 0 ? `\n⚠️ 已存在(跳过): ${skipped.map(s => '<code>' + escapeHtml(s) + '</code>').join(', ')}` : '';
+				await sendTelegramMessage(chatId, `✅ 已添加违禁词: <code>${escapeHtml(display)}</code>\n请选择处罚方式：${skipText}`, JSON.stringify(keyboard), null, true);
+			}
+		} else {
+			let msg = `⚠️ 全部已存在，未添加新词`;
+			if (skipped.length > 0) {
+				msg += `: ${skipped.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
+			}
+			await sendTelegramMessage(chatId, msg, null, null, true);
 		}
-		msg += `\n\n当前共 <b>${current.length}</b> 个违禁词`;
-		await sendTelegramMessage(chatId, msg, null, null, true);
 		return;
 	}
 
@@ -2945,6 +2965,12 @@ async function handleMessage(message, env) {
 			}
 		}
 		await saveBannedWords(env, current);
+		// 清理已删除词的独立规则
+		for (const w of removed) {
+			const dw = w.startsWith('"') && w.endsWith('"') ? w.slice(1, -1) : w;
+			await saveWordRule(env, dw, null);
+			await saveWordRule(env, w, null);
+		}
 		let msg = `✅ 已删除违禁词: ${removed.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
 		if (notFound.length > 0) {
 			msg += `\n⚠️ 未找到: ${notFound.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
@@ -2964,13 +2990,23 @@ async function handleMessage(message, env) {
 			await sendTelegramMessage(chatId, 'ℹ️ 当前没有违禁词。使用 <code>/addwords 词1,词2</code> 添加', null, null, true);
 			return;
 		}
+		const rules = await getWordRules(env);
 		const wordList = words.map((w, i) => {
 			const isExact = w.startsWith('"') && w.endsWith('"');
 			const label = isExact ? '精确' : '包含';
 			const display = isExact ? w.slice(1, -1) : w;
-			return `${i + 1}. <code>${escapeHtml(display)}</code> [${label}匹配]`;
+			const rule = rules[display] || rules[w];
+			let ruleTag = '';
+			if (rule) {
+				const pt = rule.punishType === 'mute' ? '🔇禁言' : rule.punishType === 'ban' ? '🔨封禁' : '👢踢出';
+				const wl = rule.warningLimit || 3;
+				ruleTag = ` | ${pt} ${wl}次`;
+			} else {
+				ruleTag = ` | 默认(踢出 3次)`;
+			}
+			return `${i + 1}. <code>${escapeHtml(display)}</code> [${label}匹配]${ruleTag}`;
 		}).join('\n');
-		await sendTelegramMessage(chatId, `📋 <b>违禁词列表</b> (共 ${words.length} 个)\n\n${wordList}\n\n⚠️ 触发 ${WORD_WARNING_LIMIT} 次永久封禁\n💡 <code>"词"</code> = 精确匹配（整条消息等于该词）\n💡 <code>词</code> = 包含匹配（消息中出现该词即可）\n\n使用 <code>/addwords</code> 添加 / <code>/delwords</code> 删除`, null, null, true);
+		await sendTelegramMessage(chatId, `📋 <b>违禁词列表</b> (共 ${words.length} 个)\n\n${wordList}\n\n💡 <code>"词"</code> = 精确匹配（整条消息等于该词）\n💡 <code>词</code> = 包含匹配（消息中出现该词即可）\n\n使用 <code>/addwords</code> 添加 / <code>/delwords</code> 删除`, null, null, true);
 		return;
 	}
 
@@ -3809,14 +3845,37 @@ async function checkBannedWords(message, env) {
 
 	const userLabel = `@${username}`;
 	const displayWord = matchedWord.startsWith('"') && matchedWord.endsWith('"') ? matchedWord.slice(1, -1) : matchedWord;
-	const displayWords = matchedWords.map(w => w.startsWith('"') && w.endsWith('"') ? w.slice(1, -1) : w);
+	const displayWords = matchedWords.map(w => w.startsWith('\"') && w.endsWith('\"') ? w.slice(1, -1) : w);
 
 	if (newCount >= limit) {
 		// 达到上限，执行处罚
 		const punishType = effectiveConfig.punishType || 'kick';
 		const banDuration = effectiveConfig.banDuration || 0;
 
-		if (punishType === 'ban') {
+		if (punishType === 'mute') {
+			// 禁言（restrictChatMember，不踢出群）
+			try {
+				await muteUserInChat(chatId, userId);
+				await markUserGroupStatus(env, userId, '禁言', chatId);
+			} catch (e) {
+				console.error('[违禁词] 禁言失败:', e.message);
+			}
+			const muteDurationText = banDuration > 0 ? `临时禁言 ${Math.round(banDuration / 60)} 分钟` : '永久禁言';
+			await sendTelegramMessage(chatId, `🔇 <b>用户已被${muteDurationText}</b>\n\n${userLabel} 累计触发违禁词 <b>${newCount}</b> 次，已达上限(${limit}次)。\n已${muteDurationText}。\n命中词：${displayWords.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`, null, false);
+
+			// 临时禁言：到期后自动解除
+			if (banDuration > 0) {
+				setTimeout(async () => {
+					try {
+						await restrictUserInChat(chatId, userId);
+						await markUserGroupStatus(env, userId, '健康', chatId);
+						console.log(`[违禁词] 临时禁言到期，已解除 user=${userId}`);
+					} catch (e) {
+						console.error('[违禁词] 自动解除禁言失败:', e.message);
+					}
+				}, banDuration * 1000);
+			}
+		} else if (punishType === 'ban') {
 			// 封禁 + 加入联网黑名单
 			try {
 				await banUserPermanently(chatId, userId);
@@ -5482,6 +5541,90 @@ async function handleAdCommand(message, env, preAssessedThreat = null, options =
 	}
 
 	await saveAdVoteState(env, state);
+}
+
+// ========================================================
+// 违禁词规则配置回调处理 (bw: 前缀)
+// ========================================================
+async function handleBannedWordCallbackQuery(callbackQuery, env) {
+	const data = callbackQuery.data || '';
+	if (!data.startsWith('bw:')) return false;
+
+	const message = callbackQuery.message;
+	const chatId = message?.chat?.id;
+	const operatorId = callbackQuery.from.id;
+
+	// 仅管理员可操作
+	if (!await checkCommandAdmin(operatorId, { chat: { id: chatId, type: message?.chat?.type } })) {
+		try { await answerCallbackQuery(callbackQuery.id, '仅限管理员操作', true); } catch (_) { }
+		return true;
+	}
+
+	const parts = data.split(':');
+	const step = parts[1]; // 't' = 选处罚方式, 'c' = 选触发次数
+
+	try {
+		if (step === 't') {
+			// 用户选择了处罚方式，现在显示次数选择
+			const punishType = parts[2]; // mute/kick/ban
+			const word = parts.slice(3).join(':'); // 词可能含冒号
+			if (!word) { await answerCallbackQuery(callbackQuery.id, '参数错误', true); return true; }
+
+			const display = word.startsWith('"') && word.endsWith('"') ? word.slice(1, -1) : word;
+			const punishLabel = punishType === 'mute' ? '🔇 禁言' : punishType === 'ban' ? '🔨 封禁+拉黑' : '👢 踢出';
+
+			const keyboard = {
+				inline_keyboard: [
+					[
+						{ text: '1次', callback_data: `bw:c:1:${punishType}:${word}` },
+						{ text: '2次', callback_data: `bw:c:2:${punishType}:${word}` },
+						{ text: '3次', callback_data: `bw:c:3:${punishType}:${word}` },
+					],
+					[
+						{ text: '4次', callback_data: `bw:c:4:${punishType}:${word}` },
+						{ text: '5次', callback_data: `bw:c:5:${punishType}:${word}` },
+						{ text: '10次', callback_data: `bw:c:10:${punishType}:${word}` },
+					]
+				]
+			};
+
+			await answerCallbackQuery(callbackQuery.id);
+			await editMessageText(chatId, message.message_id,
+				`✅ 违禁词: <code>${escapeHtml(display)}</code>\n处罚方式: ${punishLabel}\n请选择触发次数（达到此次后执行处罚）：`,
+				JSON.stringify(keyboard));
+		} else if (step === 'c') {
+			// 用户选择了触发次数，保存规则
+			const count = parseInt(parts[2]);
+			const punishType = parts[3]; // mute/kick/ban
+			const word = parts.slice(4).join(':');
+			if (!word || !count) { await answerCallbackQuery(callbackQuery.id, '参数错误', true); return true; }
+
+			const display = word.startsWith('"') && word.endsWith('"') ? word.slice(1, -1) : word;
+			const punishLabel = punishType === 'mute' ? '🔇 禁言' : punishType === 'ban' ? '🔨 封禁+拉黑' : '👢 踢出';
+
+			const rule = { punishType, warningLimit: count, banDuration: 0 };
+			await saveWordRule(env, display, rule);
+			// 同时用原始词（含引号）也存一份，防止精确匹配词查不到
+			if (word !== display) {
+				await saveWordRule(env, word, rule);
+			}
+
+			await answerCallbackQuery(callbackQuery.id, `已保存: ${punishLabel} ${count}次`);
+			await editMessageText(chatId, message.message_id,
+				`✅ <b>违禁词规则已保存</b>\n\n违禁词: <code>${escapeHtml(display)}</code>\n处罚: ${punishLabel}\n触发次数: ${count}次`);
+
+			// 20秒后自动删除
+			setTimeout(async () => {
+				try { await deleteMessage(chatId, message.message_id); } catch (_) {}
+			}, 20000);
+		} else {
+			await answerCallbackQuery(callbackQuery.id, '无效操作', true);
+		}
+	} catch (error) {
+		console.error('[违禁词规则] 回调处理异常:', error.message);
+		try { await answerCallbackQuery(callbackQuery.id, `操作失败: ${String(error.message).slice(0, 80)}`, true); } catch (_) { }
+	}
+	return true;
 }
 
 async function handleAdCallbackQuery(callbackQuery, env) {
