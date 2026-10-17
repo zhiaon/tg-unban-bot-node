@@ -88,6 +88,226 @@ const WORD_WARNING_STORAGE_KEY = 'banned_words_v1';
 const AUTO_REPLY_STORAGE_KEY = 'auto_replies_v1';
 const BANNED_WORDS_CONFIG_KEY = 'banned_words_config_v1';
 const BANNED_WORDS_RULES_KEY = 'banned_words_rules_v1';
+// ========================================================
+// AI 智能功能模块 (广告识别 + 情绪监控 + 智能问答 + 每日摘要)
+// ========================================================
+
+const AI_CONFIG_KEY = 'ai_config_v1';
+const FAQ_KEY = 'faq_pairs_v1';
+const AI_LAST_SUMMARY_KEY = 'ai_last_summary_date';
+
+let aiConfig = {
+	adDetection: true,
+	sentimentMonitor: true,
+	faqEnabled: true,
+	dailySummary: true,
+	summaryHour: 23,
+};
+
+async function getAiConfig(env) {
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(AI_CONFIG_KEY).first();
+		if (row) { try { return { ...aiConfig, ...JSON.parse(row.value) }; } catch { return { ...aiConfig }; } }
+		if (env.KV) { try { const raw = await env.KV.get(AI_CONFIG_KEY, { type: 'json' }); return raw ? { ...aiConfig, ...raw } : { ...aiConfig }; } catch {} }
+	}
+	return { ...aiConfig };
+}
+
+async function saveAiConfig(env, config) {
+	const json = JSON.stringify(config);
+	if (isDbReady(env)) {
+		await env.DB.prepare('INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(AI_CONFIG_KEY, json).run();
+	}
+	if (env.KV) { await env.KV.put(AI_CONFIG_KEY, json); }
+}
+
+async function getFaqs(env) {
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(FAQ_KEY).first();
+		if (row) { try { return JSON.parse(row.value); } catch { return []; } }
+	}
+	if (env.KV) { try { const raw = await env.KV.get(FAQ_KEY, { type: 'json' }); return raw || []; } catch {} }
+	return [];
+}
+
+async function saveFaqs(env, faqs) {
+	const json = JSON.stringify(faqs);
+	if (isDbReady(env)) {
+		await env.DB.prepare('INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(FAQ_KEY, json).run();
+	}
+	if (env.KV) { await env.KV.put(FAQ_KEY, json); }
+}
+
+// AI 消息分析 (广告+情绪, 一次调用)
+async function aiAnalyzeMessage(text, env) {
+	if (!env.AI) return null;
+	try {
+		const result = await env.AI.run('ai', {
+			messages: [
+				{ role: 'system', content: '你是一个群消息分析器。分析以下消息：1.是否是广告/推广/诈骗/引流 2.是否包含攻击性/辱骂/引战内容。只返回JSON：{"is_ad":false,"is_hostile":false,"reason":"简短说明"}' },
+				{ role: 'user', content: text.slice(0, 500) }
+			]
+		});
+		const responseText = extractAiResponseText(result);
+		if (!responseText) return null;
+		const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+		if (jsonMatch) { return JSON.parse(jsonMatch[0]); }
+	} catch (e) { console.error('[AI] 分析失败:', e.message); }
+	return null;
+}
+
+// AI FAQ 匹配
+async function aiMatchFaq(text, faqs, env) {
+	if (!env.AI || faqs.length === 0) return null;
+	try {
+		const faqText = faqs.map((f, i) => `Q${i+1}: ${f.question}\nA${i+1}: ${f.answer}`).join('\n');
+		const result = await env.AI.run('ai', {
+			messages: [
+				{ role: 'system', content: `根据FAQ知识库回答用户问题。如果匹配某个FAQ，返回其答案；如果不匹配，只回复"无匹配"。\n\n${faqText}` },
+				{ role: 'user', content: text.slice(0, 200) }
+			]
+		});
+		const responseText = extractAiResponseText(result);
+		if (responseText && !responseText.includes('无匹配')) { return responseText.trim(); }
+	} catch (e) { console.error('[AI] FAQ匹配失败:', e.message); }
+	return null;
+}
+
+// 确保消息表存在
+async function ensureDailyMsgTable(env) {
+	if (!isDbReady(env)) return;
+	try {
+		await env.DB.prepare('CREATE TABLE IF NOT EXISTS ai_daily_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, tgid TEXT, username TEXT, message_text TEXT, timestamp INTEGER, date TEXT)').run();
+	} catch (e) { /* 表已存在 */ }
+}
+
+// 存储每日消息
+async function storeDailyMessage(message, env) {
+	if (!isDbReady(env)) return;
+	try {
+		const text = (message.text || message.caption || '').slice(0, 1000);
+		if (!text) return;
+		const now = Math.floor(Date.now() / 1000);
+		const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+		await env.DB.prepare('INSERT INTO ai_daily_messages (tgid, username, message_text, timestamp, date) VALUES (?, ?, ?, ?, ?)').bind(String(message.from?.id || ''), message.from?.username || message.from?.first_name || '', text, now, today).run();
+	} catch (e) {
+		if (e.message.includes('no such table')) { await ensureDailyMsgTable(env); }
+		else { console.error('[AI] 存储消息失败:', e.message); }
+	}
+}
+
+// 生成每日摘要
+async function generateDailySummary(env, config) {
+	if (!env.AI || !isDbReady(env)) return;
+	const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+	try {
+		const result = await env.DB.prepare('SELECT message_text, username FROM ai_daily_messages WHERE date = ? ORDER BY timestamp ASC LIMIT 200').bind(today).all();
+		const messages = result?.results || [];
+		if (messages.length < 5) return;
+
+		const chatLog = messages.map(m => `${m.username}: ${m.message_text}`).join('\n').slice(0, 3000);
+		const aiResult = await env.AI.run('ai', {
+			messages: [
+				{ role: 'system', content: '你是群聊摘要生成器。根据群聊记录生成简短每日摘要：主要话题、重要信息、有趣内容。中文，不超过200字。' },
+				{ role: 'user', content: `今日群聊记录：\n\n${chatLog}` }
+			]
+		});
+		const summary = extractAiResponseText(aiResult);
+		if (!summary) return;
+
+		const chatId = GROUP_ID_SET[0];
+		if (chatId) {
+			await sendTelegramMessage(chatId, `📋 <b>今日群聊摘要 (${today})</b>\n\n${summary}`, null, false);
+		}
+
+		// 清理7天前的消息
+		await env.DB.prepare("DELETE FROM ai_daily_messages WHERE date < date('now', '-7 days')").run();
+
+		// 标记已发送
+		await env.DB.prepare('INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(AI_LAST_SUMMARY_KEY, today).run();
+		console.log('[AI] 每日摘要已发送');
+	} catch (e) { console.error('[AI] 每日摘要失败:', e.message); }
+}
+
+// 检查是否到了摘要时间
+async function checkAndGenerateSummary(env, config) {
+	if (!config.dailySummary || !config.summaryHour) return;
+	try {
+		const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+		const today = now.toISOString().slice(0, 10);
+
+		if (isDbReady(env)) {
+			const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(AI_LAST_SUMMARY_KEY).first();
+			if (row && row.value === today) return;
+		}
+		if (now.getHours() >= config.summaryHour) { await generateDailySummary(env, config); }
+	} catch (e) { console.error('[AI] 摘要定时检查失败:', e.message); }
+}
+
+// AI 主处理函数
+async function aiProcessMessage(message, env) {
+	if (!isMainGroup(message.chat.id)) return;
+	if (!message.from || message.from.is_bot) return;
+	const text = (message.text || message.caption || '');
+	if (!text || text.length < 5 || text.startsWith('/')) return;
+
+	const config = await getAiConfig(env);
+
+	// 1. 存储消息(用于每日摘要)
+	if (config.dailySummary) { await storeDailyMessage(message, env); }
+
+	// 2. AI 广告+情绪分析 (有触发条件才调用，省 API)
+	const hasUrl = /https?:\/\/|t\.me|\.top|\.cn|\.com|\.vip/i.test(text);
+	const hasAd = /加我|私聊|微信|vx|wx|扫码|代理|开卡|低价|免费领|送福利/i.test(text);
+	const hasAggressive = /傻|草|骂|打|杀|滚|蠢|废物|垃圾|sb|nmsl|脑残|智障|畜生/i.test(text);
+	const needsAnalysis = (config.adDetection && (hasUrl || hasAd)) || (config.sentimentMonitor && hasAggressive);
+
+	if (needsAnalysis && env.AI) {
+		const result = await aiAnalyzeMessage(text, env);
+		if (result) {
+			if (config.adDetection && result.is_ad) {
+				const isAdmin = await checkIfUserIsAdminInAnyMainGroup(message.from.id);
+				if (!isAdmin) {
+					await deleteMessage(message.chat.id, message.message_id);
+					const currentWarnings = await getUserWarnings(env, message.from.id);
+					const newCount = currentWarnings + 1;
+					await setUserWarnings(env, message.from.id, newCount);
+					const userLabel = message.from.username ? `@${message.from.username}` : message.from.first_name;
+					if (newCount >= 3) {
+						await banUserPermanently(message.chat.id, message.from.id);
+						await sendTelegramMessage(message.chat.id, `🚫 <b>AI广告检测 - 已封禁</b>\n\n${userLabel} 累计 ${newCount} 次发布广告，已封禁踢出。\nAI原因: ${result.reason}`, null, false);
+					} else {
+						await sendTelegramMessage(message.chat.id, `⚠️ <b>AI广告检测</b>\n\n${userLabel} 的消息被AI判定为广告，已删除。\nAI原因: ${result.reason}\n警告 ${newCount}/3`, null, false);
+					}
+					return;
+				}
+			}
+			if (config.sentimentMonitor && result.is_hostile) {
+				const userLabel = message.from.username ? `@${message.from.username}` : message.from.first_name;
+				console.log(`[AI情绪] 攻击性消息: ${userLabel}: ${text.slice(0, 80)}`);
+			}
+		}
+	}
+
+	// 3. 智能问答
+	if (config.faqEnabled && env.AI) {
+		const trimmed = text.trim();
+		const isQuestion = /[?？]$/.test(trimmed) || /^(怎么|为什么|如何|什么|哪|是不是|能不能|可以吗|请问|帮我|有没有|多少)/.test(trimmed);
+		if (isQuestion) {
+			const faqs = await getFaqs(env);
+			if (faqs.length > 0) {
+				const answer = await aiMatchFaq(trimmed, faqs, env);
+				if (answer) {
+					await sendTelegramMessage(message.chat.id, `💬 <b>智能问答</b>\n\n${answer}`, null, message.message_id, true);
+				}
+			}
+		}
+	}
+
+	// 4. 定时摘要检查
+	if (config.dailySummary) { await checkAndGenerateSummary(env, config); }
+}
+
 const GROUP_IDS_KEY = 'group_ids_v1';
 
 // 违禁词配置（运行时可变，存 DB）
@@ -1852,6 +2072,9 @@ async function handleInitialization(request) {
 				{ command: "spam", description: "回复消息添加用户到黑名单 (管理员)" },
 				{ command: "check", description: "查询用户封禁状态 (管理员)" },
 				{ command: "addwords", description: "添加违禁词 (管理员)" },
+			{ command: "addfaq", description: "添加FAQ问答 (管理员)" },
+			{ command: "delfaq", description: "删除FAQ问答 (管理员)" },
+			{ command: "listfaq", description: "查看FAQ列表 (管理员)" },
 				{ command: "delwords", description: "删除违禁词 (管理员)" },
 				{ command: "listwords", description: "查看所有违禁词 (管理员)" },
 				{ command: "clearwarn", description: "清除违禁词警告 (管理员)" },
@@ -2572,6 +2795,13 @@ async function handleMessage(message, env) {
 		console.error('[违禁词] 检测异常:', error.message);
 	}
 
+	// AI 智能处理: 广告识别 + 情绪监控 + 智能问答 + 消息存储
+	try {
+		await aiProcessMessage(message, env);
+	} catch (error) {
+		console.error('[AI] 处理异常:', error.message);
+	}
+
 	// 管理员: /addgroup - 添加群 ID 到联ban范围
 	if (text && text.trim().startsWith('/addgroup')) {
 		if (message.chat.type !== 'private' && !(await checkIfUserIsAdminInChat(userId, chatId))) return;
@@ -2678,6 +2908,7 @@ async function handleMessage(message, env) {
 				[{ text: '📊 概览统计', callback_data: 'pnl:overview' }, { text: '⚙️ Bot 设置', callback_data: 'pnl:settings' }],
 				[{ text: '🚫 违禁词管理', callback_data: 'pnl:words' }, { text: '⚠️ 警告记录', callback_data: 'pnl:warnings' }],
 				[{ text: '📋 联网黑名单', callback_data: 'pnl:blacklist' }, { text: '💬 自动回复', callback_data: 'pnl:autoreply' }],
+				[{ text: '🤖 AI 智能功能', callback_data: 'pnl:ai' }],
 				[{ text: '👥 群 ID 管理', callback_data: 'pnl:groups' }]
 			]
 		};
@@ -3005,6 +3236,62 @@ async function handleMessage(message, env) {
 			return `${i + 1}. <code>${escapeHtml(display)}</code> [${label}匹配]${ruleTag}`;
 		}).join('\n');
 		await sendTelegramMessage(chatId, `📋 <b>违禁词列表</b> (共 ${words.length} 个)\n\n${wordList}\n\n💡 <code>"词"</code> = 精确匹配（整条消息等于该词）\n💡 <code>词</code> = 包含匹配（消息中出现该词即可）\n\n使用 <code>/addwords</code> 添加 / <code>/delwords</code> 删除`, null, null, true);
+		return;
+	}
+
+	// 管理员: /addfaq 问题 | 答案 — 添加FAQ
+	const addFaqCmd = parseCommand(text, 'addfaq');
+	if (addFaqCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		const args = addFaqCmd.args.trim();
+		if (!args || !args.includes('|')) {
+			await sendTelegramMessage(chatId, '❌ 使用方法: <code>/addfaq 问题 | 答案</code>', null, null, true);
+			return;
+		}
+		const [q, ...aParts] = args.split('|');
+		const question = q.trim();
+		const answer = aParts.join('|').trim();
+		if (!question || !answer) {
+			await sendTelegramMessage(chatId, '❌ 问题和答案不能为空', null, null, true);
+			return;
+		}
+		const faqs = await getFaqs(env);
+		faqs.push({ question, answer });
+		await saveFaqs(env, faqs);
+		await sendTelegramMessage(chatId, `✅ 已添加FAQ #${faqs.length}\n<b>Q:</b> ${escapeHtml(question)}\n<b>A:</b> ${escapeHtml(answer)}`, null, null, true);
+		return;
+	}
+
+	// 管理员: /delfaq <序号> — 删除FAQ
+	const delFaqCmd = parseCommand(text, 'delfaq');
+	if (delFaqCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		const idx = parseInt(delFaqCmd.args.trim()) - 1;
+		const faqs = await getFaqs(env);
+		if (isNaN(idx) || idx < 0 || idx >= faqs.length) {
+			await sendTelegramMessage(chatId, '❌ 序号无效', null, null, true);
+			return;
+		}
+		const removed = faqs.splice(idx, 1)[0];
+		await saveFaqs(env, faqs);
+		await sendTelegramMessage(chatId, `✅ 已删除FAQ: ${escapeHtml(removed.question)}`, null, null, true);
+		return;
+	}
+
+	// 管理员: /listfaq — 列出所有FAQ
+	const listFaqCmd = parseCommand(text, 'listfaq');
+	if (listFaqCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		const faqs = await getFaqs(env);
+		if (faqs.length === 0) {
+			await sendTelegramMessage(chatId, 'ℹ️ 当前没有FAQ。使用 <code>/addfaq 问题 | 答案</code> 添加', null, null, true);
+			return;
+		}
+		const faqList = faqs.map((f, i) => `${i + 1}. <b>Q:</b> ${escapeHtml(f.question)}\n   <b>A:</b> ${escapeHtml(f.answer)}`).join('\n\n');
+		await sendTelegramMessage(chatId, `📋 <b>FAQ列表</b> (共 ${faqs.length} 条)\n\n${faqList}`, null, null, true);
 		return;
 	}
 
@@ -6453,6 +6740,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					[{ text: '📊 概览统计', callback_data: 'pnl:overview' }, { text: '⚙️ Bot 设置', callback_data: 'pnl:settings' }],
 					[{ text: '🚫 违禁词管理', callback_data: 'pnl:words' }, { text: '⚠️ 警告记录', callback_data: 'pnl:warnings' }],
 					[{ text: '📋 联网黑名单', callback_data: 'pnl:blacklist' }, { text: '💬 自动回复', callback_data: 'pnl:autoreply' }],
+				[{ text: '🤖 AI 智能功能', callback_data: 'pnl:ai' }],
 					[{ text: '👥 群 ID 管理', callback_data: 'pnl:groups' }]
 				]
 			};
@@ -6575,7 +6863,145 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			return true;
 		}
 
-		// 单个违禁词设置页面
+	// AI 智能功能面板
+	if (action === 'ai') {
+		const config = await getAiConfig(env);
+		const faqs = await getFaqs(env);
+		const aiStatus = env.AI ? '✅ 已启用' : '❌ 未配置API Key';
+		const msg = '🤖 <b>AI 智能功能</b>\n\n' +
+			'AI引擎: ' + aiStatus + '\n' +
+			'FAQ数量: <b>' + faqs.length + '</b> 条\n\n' +
+			'<b>功能开关:</b>\n' +
+			'广告识别: ' + (config.adDetection ? '✅' : '❌') + '\n' +
+			'情绪监控: ' + (config.sentimentMonitor ? '✅' : '❌') + '\n' +
+			'智能问答: ' + (config.faqEnabled ? '✅' : '❌') + '\n' +
+			'每日摘要: ' + (config.dailySummary ? '✅' : '❌') + '\n' +
+			'摘要时间: <b>' + config.summaryHour + ':00</b>';
+		const buttons = [
+			[
+				{ text: (config.adDetection ? '✅' : '❌') + ' 广告识别', callback_data: 'pnl:aitg:adDetection' },
+				{ text: (config.sentimentMonitor ? '✅' : '❌') + ' 情绪监控', callback_data: 'pnl:aitg:sentimentMonitor' }
+			],
+			[
+				{ text: (config.faqEnabled ? '✅' : '❌') + ' 智能问答', callback_data: 'pnl:aitg:faqEnabled' },
+				{ text: (config.dailySummary ? '✅' : '❌') + ' 每日摘要', callback_data: 'pnl:aitg:dailySummary' }
+			],
+			[
+				{ text: (config.summaryHour === 22 ? '🔘' : '⚪') + ' 22:00', callback_data: 'pnl:aihr:22' },
+				{ text: (config.summaryHour === 23 ? '🔘' : '⚪') + ' 23:00', callback_data: 'pnl:aihr:23' },
+				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
+			],
+			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			backButton
+		];
+		const markup = { inline_keyboard: buttons };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
+		return true;
+	}
+
+	// AI 配置开关
+	if (action === 'aitg') {
+		const key = parts[2];
+		const config = await getAiConfig(env);
+		if (config[key] !== undefined) { config[key] = !config[key]; await saveAiConfig(env, config); }
+		// 重新渲染（复用 ai 逻辑）
+		const faqs = await getFaqs(env);
+		const aiStatus = env.AI ? '✅ 已启用' : '❌ 未配置API Key';
+		const msg = '🤖 <b>AI 智能功能</b>\n\n' +
+			'AI引擎: ' + aiStatus + '\n' +
+			'FAQ数量: <b>' + faqs.length + '</b> 条\n\n' +
+			'<b>功能开关:</b>\n' +
+			'广告识别: ' + (config.adDetection ? '✅' : '❌') + '\n' +
+			'情绪监控: ' + (config.sentimentMonitor ? '✅' : '❌') + '\n' +
+			'智能问答: ' + (config.faqEnabled ? '✅' : '❌') + '\n' +
+			'每日摘要: ' + (config.dailySummary ? '✅' : '❌') + '\n' +
+			'摘要时间: <b>' + config.summaryHour + ':00</b>';
+		const buttons = [
+			[
+				{ text: (config.adDetection ? '✅' : '❌') + ' 广告识别', callback_data: 'pnl:aitg:adDetection' },
+				{ text: (config.sentimentMonitor ? '✅' : '❌') + ' 情绪监控', callback_data: 'pnl:aitg:sentimentMonitor' }
+			],
+			[
+				{ text: (config.faqEnabled ? '✅' : '❌') + ' 智能问答', callback_data: 'pnl:aitg:faqEnabled' },
+				{ text: (config.dailySummary ? '✅' : '❌') + ' 每日摘要', callback_data: 'pnl:aitg:dailySummary' }
+			],
+			[
+				{ text: (config.summaryHour === 22 ? '🔘' : '⚪') + ' 22:00', callback_data: 'pnl:aihr:22' },
+				{ text: (config.summaryHour === 23 ? '🔘' : '⚪') + ' 23:00', callback_data: 'pnl:aihr:23' },
+				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
+			],
+			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			backButton
+		];
+		const markup = { inline_keyboard: buttons };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id, '✅ 已更新'); } catch (_) {}
+		return true;
+	}
+
+	// AI 摘要时间设置
+	if (action === 'aihr') {
+		const hr = parseInt(parts[2]);
+		const config = await getAiConfig(env);
+		if (!isNaN(hr)) { config.summaryHour = hr; await saveAiConfig(env, config); }
+		// 重新渲染
+		const faqs = await getFaqs(env);
+		const aiStatus = env.AI ? '✅ 已启用' : '❌ 未配置API Key';
+		const msg = '🤖 <b>AI 智能功能</b>\n\n' +
+			'AI引擎: ' + aiStatus + '\n' +
+			'FAQ数量: <b>' + faqs.length + '</b> 条\n\n' +
+			'<b>功能开关:</b>\n' +
+			'广告识别: ' + (config.adDetection ? '✅' : '❌') + '\n' +
+			'情绪监控: ' + (config.sentimentMonitor ? '✅' : '❌') + '\n' +
+			'智能问答: ' + (config.faqEnabled ? '✅' : '❌') + '\n' +
+			'每日摘要: ' + (config.dailySummary ? '✅' : '❌') + '\n' +
+			'摘要时间: <b>' + config.summaryHour + ':00</b>';
+		const buttons = [
+			[
+				{ text: (config.adDetection ? '✅' : '❌') + ' 广告识别', callback_data: 'pnl:aitg:adDetection' },
+				{ text: (config.sentimentMonitor ? '✅' : '❌') + ' 情绪监控', callback_data: 'pnl:aitg:sentimentMonitor' }
+			],
+			[
+				{ text: (config.faqEnabled ? '✅' : '❌') + ' 智能问答', callback_data: 'pnl:aitg:faqEnabled' },
+				{ text: (config.dailySummary ? '✅' : '❌') + ' 每日摘要', callback_data: 'pnl:aitg:dailySummary' }
+			],
+			[
+				{ text: (config.summaryHour === 22 ? '🔘' : '⚪') + ' 22:00', callback_data: 'pnl:aihr:22' },
+				{ text: (config.summaryHour === 23 ? '🔘' : '⚪') + ' 23:00', callback_data: 'pnl:aihr:23' },
+				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
+			],
+			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			backButton
+		];
+		const markup = { inline_keyboard: buttons };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id, '✅ 已更新'); } catch (_) {}
+		return true;
+	}
+
+	// FAQ 列表面板
+	if (action === 'faq') {
+		const faqs = await getFaqs(env);
+		let faqList;
+		if (faqs.length === 0) {
+			faqList = '暂无FAQ\n使用 /addfaq 问题 | 答案 添加';
+		} else {
+			faqList = faqs.map((f, i) => `${i + 1}. Q: ${escapeHtml(f.question)}\n   A: ${escapeHtml(f.answer)}`).join('\n\n');
+		}
+		const msg = '💬 <b>FAQ管理</b> (' + faqs.length + '条)\n\n' + faqList;
+		const buttons = [backButton];
+		const markup = { inline_keyboard: buttons };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
+		return true;
+	}
+
+			// 单个违禁词设置页面
 		if (action === 'bwri') {
 			const idx = parseInt(parts[2]);
 			const words = await getBannedWords(env);
