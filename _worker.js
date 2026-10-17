@@ -244,31 +244,43 @@ async function checkAndGenerateSummary(env, config) {
 	} catch (e) { console.error('[AI] 摘要定时检查失败:', e.message); }
 }
 
-// 吵架检测跟踪器 (内存, 每群独立)
-const argumentTracker = new Map(); // key: chatId → [{userId, time, hostility}]
+// 吵架检测跟踪器 (内存, 每群独立, 只跟踪回复链)
+const argumentTracker = new Map(); // key: chatId → [{fromId, toId, time, hostility}]
 
-// 检查是否构成吵架 (5分钟内 2+ 人 3+ 条敌意消息)
-async function checkArgument(chatId, userId, hostility) {
+// 检查是否构成吵架 (5分钟内, 回复链中 3+ 条敌意消息 × 2+ 人互怼)
+// 只统计有明确回复目标的敌意消息, 避免误判正常聊天
+async function checkArgument(chatId, fromId, toId, hostility) {
 	const key = String(chatId);
 	const now = Date.now();
 	if (!argumentTracker.has(key)) argumentTracker.set(key, []);
 	const entries = argumentTracker.get(key);
-	entries.push({ userId: String(userId), time: now, hostility });
+	entries.push({ fromId: String(fromId), toId: String(toId), time: now, hostility });
 	// 清理5分钟前的记录
 	const cutoff = now - 5 * 60 * 1000;
 	const recent = entries.filter(e => e.time > cutoff);
 	argumentTracker.set(key, recent);
-	// 检查: 3+ 条敌意消息(hostility>=2), 来自 2+ 不同用户
+	// 只看敌意消息 (hostility >= 2)
 	const hostile = recent.filter(e => e.hostility >= 2);
-	if (hostile.length >= 3) {
-		const userIds = new Set(hostile.map(e => e.userId));
-		if (userIds.size >= 2) {
-			// 清空该群的记录, 避免重复触发
-			argumentTracker.set(key, []);
-			return { users: [...userIds], messages: hostile };
-		}
+	if (hostile.length < 3) return null;
+	// 检查是否存在互怼: A回复B + B回复A 的模式
+	const userIds = new Set();
+	const pairs = new Set(); // "A→B" 格式
+	for (const e of hostile) {
+		userIds.add(e.fromId);
+		pairs.add(`${e.fromId}→${e.toId}`);
 	}
-	return null;
+	// 需要 2+ 不同用户参与
+	if (userIds.size < 2) return null;
+	// 检查是否有双向回复 (A→B 且 B→A), 这才是真正的吵架
+	let hasBidirectional = false;
+	for (const p of pairs) {
+		const [a, b] = p.split('→');
+		if (pairs.has(`${b}→${a}`)) { hasBidirectional = true; break; }
+	}
+	if (!hasBidirectional) return null;
+	// 确认是吵架: 清空记录, 返回参与者
+	argumentTracker.set(key, []);
+	return { users: [...userIds], messages: hostile };
 }
 
 // 自动介入
@@ -362,11 +374,16 @@ async function aiProcessMessage(message, env) {
 					}
 				} catch (e) { console.error('[AI情绪] 通知管理员失败:', e.message); }
 
-				// (2) 连续对话检测 (3+ 条敌意消息 × 2+ 人 → 判定为吵架)
-				const argResult = await checkArgument(message.chat.id, message.from.id, hostilityLevel);
-				if (argResult) {
-					// (3) 自动介入 (传入选中的用户列表)
-					await autoIntervene(message.chat.id, env, hostilityLevel, argResult.users);
+				// (2) 连续对话检测 (仅回复链中的互怼才算吵架, 正常聊天不会误判)
+				if (message.reply_to_message) {
+					const targetId = message.reply_to_message.from?.id;
+					if (targetId) {
+						const argResult = await checkArgument(message.chat.id, message.from.id, targetId, hostilityLevel);
+						if (argResult) {
+							// (3) 自动介入 (传入选中的用户列表)
+							await autoIntervene(message.chat.id, env, hostilityLevel, argResult.users);
+						}
+					}
 				}
 			}
 		}
