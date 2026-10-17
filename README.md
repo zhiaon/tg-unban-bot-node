@@ -19,8 +19,9 @@ Telegram 群组自助解封 + 违禁词管理 + 自动回复机器人。
 | 部署 | 仅 Cloudflare Workers | **双版本：CF Workers + Node.js 服务器** |
 | 存储 | CF KV / D1 | CF: KV/D1 · Node: SQLite |
 | AI 评级 | Workers AI | CF: Workers AI · Node: DeepSeek API |
-| 违禁词 | ❌ | ✅ 支持精确/包含匹配、单个词独立规则 |
+| 违禁词 | ❌ | ✅ 每词独立规则（禁言/踢出/封禁+拉黑） |
 | 自动回复 | ❌ | ✅ 关键词触发 |
+| AI 智能功能 | ❌ | ✅ 广告识别 + 情绪监控 + 智能问答 + 每日摘要 |
 | Web 管理面板 | ❌ | ✅ 移动端友好的网页面板 |
 | 面板按钮 | ❌ | ✅ Telegram 内联按钮面板 |
 | 群 ID 管理 | ❌ | ✅ 动态添加/删除群 |
@@ -59,7 +60,13 @@ Telegram 群组自助解封 + 违禁词管理 + 自动回复机器人。
 - **自动回复**：`/autoreply 关键词=回复内容`
 - **群 ID 管理**：`/addgroup` `/delgroup`
 - **命令回复自动删除**：群内命令回复 20 秒后自动删除
+- **AI 智能功能**：
+  - 🤖 **广告自动识别**：检测广告/推广/诈骗消息，自动删除+警告，累计 3 次封禁
+  - 😡 **情绪监控**：AI 判定攻击等级 0-3，通知管理员+消息链接，检测回复链互怼自动介入
+  - 💬 **智能问答(FAQ)**：知识库匹配，用户提问自动回答（`/addfaq` `/delfaq` `/listfaq`）
+  - 📋 **每日摘要**：存储每日消息，定时 AI 生成摘要发群里
 - **管理面板**：`/panel`（Telegram 内联按钮）+ `/panel` 网页版
+  - 违禁词管理（每词独立规则）、AI 智能功能配置、警告记录、黑名单、自动回复
 
 ## 部署
 
@@ -133,10 +140,47 @@ unban.example.com {
 | `GROUP_ID` | ✅ | 群组 ID，多个用逗号分隔 |
 | `PORT` | ❌ | 监听端口，默认 8787 |
 | `DB_PATH` | ❌ | SQLite 数据库路径 |
-| `DEEPSEEK_API_KEY` | ❌ | DeepSeek API Key（/ad AI 评级） |
-| `DEEPSEEK_MODEL` | ❌ | DeepSeek 模型，默认 deepseek-chat |
+| `DEEPSEEK_API_KEY` | ❌ | AI API Key（广告识别/情绪监控/智能问答/每日摘要） |
+| `DEEPSEEK_BASE_URL` | ❌ | AI API 地址，默认 `https://api.deepseek.com/v1` |
+| `DEEPSEEK_MODEL` | ❌ | AI 模型，默认 `deepseek-v4-flash` |
 | `AD_GROUP_RULES` | ❌ | /ad 评级群规 |
 | `AD_AI_MODEL` | ❌ | /ad 模型列表 |
+
+## AI 智能功能配置
+
+AI 功能通过 OpenAI 兼容接口调用，支持 DeepSeek、OpenAI、月之暗面、智谱等任意兼容服务。
+
+### 配置方式
+
+systemd override（推荐）：
+
+```bash
+mkdir -p /etc/systemd/system/tg-unban-bot.service.d
+cat > /etc/systemd/system/tg-unban-bot.service.d/ai.conf << 'EOF'
+[Service]
+Environment=DEEPSEEK_API_KEY=sk-你的API_KEY
+Environment=DEEPSEEK_BASE_URL=https://你的API地址/v1
+Environment=DEEPSEEK_MODEL=你的模型名
+EOF
+systemctl daemon-reload
+systemctl restart tg-unban-bot
+```
+
+### 四个 AI 功能
+
+| 功能 | 触发条件 | 处理 |
+|------|---------|------|
+| 广告识别 | 消息含 URL 或广告关键词 | AI 判定 → 删除 + 警告，累计 3 次封禁 |
+| 情绪监控 | 消息含攻击性词/情绪标点/回复链 | AI 判定等级 0-3 → 通知管理员 |
+| 智能问答 | 用户发问句（含？或"怎么/如何"等） | AI 匹配 FAQ 知识库 → 自动回复 |
+| 每日摘要 | 每天定时 | 存储当日消息 → AI 生成摘要发群里 |
+
+### 吵架检测（情绪监控子功能）
+
+- 仅检测**回复链中的双向互怼**（A 回复 B + B 回复 A），正常聊天不误判
+- 独立骂人（无回复目标）只通知管理员，不触发介入
+- L2 自动发「请群友保持理性」提醒
+- L3 自动禁言参与者 10 分钟
 
 ## 命令一览
 
@@ -154,6 +198,9 @@ unban.example.com {
 | `/autoreply 词=回复` | 管理员 | 添加自动回复 |
 | `/addgroup <ID>` | 管理员 | 添加群到联ban范围 |
 | `/delgroup <ID>` | 管理员 | 删除群 |
+| `/addfaq 问题 | 答案` | 管理员 | 添加 FAQ 问答对 |
+| `/delfaq <序号>` | 管理员 | 删除 FAQ |
+| `/listfaq` | 管理员 | 查看 FAQ 列表 |
 | `/panel` | 管理员 | 打开管理面板 |
 
 ## 网页面板
