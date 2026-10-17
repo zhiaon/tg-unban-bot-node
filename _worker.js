@@ -144,7 +144,7 @@ async function aiAnalyzeMessage(text, env) {
 	try {
 		const result = await env.AI.run('ai', {
 			messages: [
-				{ role: 'system', content: '你是一个群消息分析器。分析以下消息：1.是否是广告/推广/诈骗/引流 2.是否包含攻击性/辱骂/引战内容。只返回JSON：{"is_ad":false,"is_hostile":false,"reason":"简短说明"}' },
+				{ role: 'system', content: '你是一个群消息分析器。分析以下消息：1.是否广告/推广/诈骗/引流 2.攻击性等级0-3(0=正常,1=语气不佳,2=辱骂攻击,3=严重威胁极端侮辱)。只返回JSON：{"is_ad":false,"hostility":0,"reason":"简短说明"}' },
 				{ role: 'user', content: text.slice(0, 500) }
 			]
 		});
@@ -244,6 +244,58 @@ async function checkAndGenerateSummary(env, config) {
 	} catch (e) { console.error('[AI] 摘要定时检查失败:', e.message); }
 }
 
+// 吵架检测跟踪器 (内存, 每群独立)
+const argumentTracker = new Map(); // key: chatId → [{userId, time, hostility}]
+
+// 检查是否构成吵架 (5分钟内 2+ 人 3+ 条敌意消息)
+async function checkArgument(chatId, userId, hostility) {
+	const key = String(chatId);
+	const now = Date.now();
+	if (!argumentTracker.has(key)) argumentTracker.set(key, []);
+	const entries = argumentTracker.get(key);
+	entries.push({ userId: String(userId), time: now, hostility });
+	// 清理5分钟前的记录
+	const cutoff = now - 5 * 60 * 1000;
+	const recent = entries.filter(e => e.time > cutoff);
+	argumentTracker.set(key, recent);
+	// 检查: 3+ 条敌意消息(hostility>=2), 来自 2+ 不同用户
+	const hostile = recent.filter(e => e.hostility >= 2);
+	if (hostile.length >= 3) {
+		const userIds = new Set(hostile.map(e => e.userId));
+		if (userIds.size >= 2) {
+			// 清空该群的记录, 避免重复触发
+			argumentTracker.set(key, []);
+			return { users: [...userIds], messages: hostile };
+		}
+	}
+	return null;
+}
+
+// 自动介入
+async function autoIntervene(chatId, env, maxHostility, users) {
+	// Level 2: 发提醒消息
+	await sendTelegramMessage(chatId, '⚠️ <b>请群友保持理性</b>\n\n检测到激烈争论，请冷静讨论，勿人身攻击。多次违规将被禁言。', null, false);
+	console.log(`[AI情绪] 已发送理性提醒 chatId=${chatId}`);
+	// Level 3: 严重敌意 → 禁言参与者 10 分钟
+	if (maxHostility >= 3 && users && users.length > 0) {
+		for (const uid of users) {
+			try {
+				await muteUserInChat(chatId, uid);
+				console.log(`[AI情绪] 已禁言用户 ${uid} (10分钟)`);
+			} catch (e) { console.error(`[AI情绪] 禁言失败 ${uid}:`, e.message); }
+		}
+		const labels = users.map(u => `<code>${escapeHtml(u)}</code>`).join(', ');
+		await sendTelegramMessage(chatId, `🔇 <b>已对相关用户临时禁言 10 分钟</b>\n\n用户: ${labels}\n原因: AI检测到严重攻击性内容`, null, false);
+		// 10分钟后自动解除禁言
+		setTimeout(async () => {
+			for (const uid of users) {
+				try { await restrictUserInChat(chatId, uid); } catch (e) {}
+			}
+			console.log(`[AI情绪] 已解除禁言 users=${users.join(',')}`);
+		}, 10 * 60 * 1000);
+	}
+}
+
 // AI 主处理函数
 async function aiProcessMessage(message, env) {
 	if (!isMainGroup(message.chat.id)) return;
@@ -259,12 +311,19 @@ async function aiProcessMessage(message, env) {
 	// 2. AI 广告+情绪分析 (有触发条件才调用，省 API)
 	const hasUrl = /https?:\/\/|t\.me|\.top|\.cn|\.com|\.vip/i.test(text);
 	const hasAd = /加我|私聊|微信|vx|wx|扫码|代理|开卡|低价|免费领|送福利/i.test(text);
-	const hasAggressive = /傻|草|骂|打|杀|滚|蠢|废物|垃圾|sb|nmsl|脑残|智障|畜生/i.test(text);
-	const needsAnalysis = (config.adDetection && (hasUrl || hasAd)) || (config.sentimentMonitor && hasAggressive);
+	// 扩大触发范围：攻击性词 + 情绪标点 + 阴阳怪气 + 回复场景
+	const hasAggressive = /傻|草|骂|打|杀|滚|蠢|废物|垃圾|sb|nmsl|脑残|智障|畜生|狗|屁|滚蛋|闭嘴|你妈|你爹|孙子|贱|婊|操|日你|stupid|idiot|fuck/i.test(text);
+	const hasEmotionalPunct = /[！!]{3,}|[？?]{3,}/.test(text);
+	const hasSarcasm = /呵呵|就这|菜鸡|辣鸡|丢人|可笑|白嫖|喷子|杠精|跳梁|小丑|装什么|什么玩意/i.test(text);
+	const hasReplyTarget = !!message.reply_to_message;
+	const isLongMsg = text.length > 50;
+	const needsAnalysis = (config.adDetection && (hasUrl || hasAd)) ||
+		(config.sentimentMonitor && (hasAggressive || hasEmotionalPunct || hasSarcasm || (isLongMsg && hasReplyTarget)));
 
 	if (needsAnalysis && env.AI) {
 		const result = await aiAnalyzeMessage(text, env);
 		if (result) {
+			// 广告检测
 			if (config.adDetection && result.is_ad) {
 				const isAdmin = await checkIfUserIsAdminInAnyMainGroup(message.from.id);
 				if (!isAdmin) {
@@ -282,9 +341,33 @@ async function aiProcessMessage(message, env) {
 					return;
 				}
 			}
-			if (config.sentimentMonitor && result.is_hostile) {
-				const userLabel = message.from.username ? `@${message.from.username}` : message.from.first_name;
-				console.log(`[AI情绪] 攻击性消息: ${userLabel}: ${text.slice(0, 80)}`);
+			// 情绪监控 (hostility 0-3)
+			if (config.sentimentMonitor && result.hostility && result.hostility >= 2) {
+				const hostilityLevel = result.hostility;
+				const userLabel = message.from.username ? `@${message.from.username}` : `${message.from.first_name} (${message.from.id})`;
+				console.log(`[AI情绪] 攻击性消息 L${hostilityLevel}: ${userLabel}: ${text.slice(0, 80)}`);
+
+				// (1) 通知管理员 (私聊发送警报 + 消息链接)
+				try {
+					const adminSet = await getMainGroupAdminSet(String(message.chat.id));
+					if (adminSet && adminSet.size > 0) {
+						const chatIdRaw = String(message.chat.id).replace('-100', '');
+						const msgLink = `https://t.me/c/${chatIdRaw}/${message.message_id}`;
+						const levelText = hostilityLevel >= 3 ? '🔴 严重' : '🟡 中等';
+						const notifyText = `🚨 <b>AI情绪监控警报</b> ${levelText}\n\n用户: ${userLabel}\n等级: ${hostilityLevel}/3\nAI分析: ${result.reason}\n消息: ${escapeHtml((text).slice(0, 200))}\n<a href="${msgLink}">查看消息</a>`;
+						for (const adminId of adminSet) {
+							if (String(adminId) === String(message.from.id)) continue;
+							try { await sendTelegramMessage(String(adminId), notifyText, null, false); } catch (e) {}
+						}
+					}
+				} catch (e) { console.error('[AI情绪] 通知管理员失败:', e.message); }
+
+				// (2) 连续对话检测 (3+ 条敌意消息 × 2+ 人 → 判定为吵架)
+				const argResult = await checkArgument(message.chat.id, message.from.id, hostilityLevel);
+				if (argResult) {
+					// (3) 自动介入 (传入选中的用户列表)
+					await autoIntervene(message.chat.id, env, hostilityLevel, argResult.users);
+				}
 			}
 		}
 	}
