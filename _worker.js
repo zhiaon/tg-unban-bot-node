@@ -186,13 +186,14 @@ async function storeDailyMessage(message, env) {
 	if (!isDbReady(env)) return;
 	try {
 		const text = (message.text || message.caption || '').slice(0, 1000);
-		if (!text) return;
+		if (!text || text.length < 2) return;
+		// 先确保表存在
+		await ensureDailyMsgTable(env);
 		const now = Math.floor(Date.now() / 1000);
 		const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
 		await env.DB.prepare('INSERT INTO ai_daily_messages (tgid, username, message_text, timestamp, date) VALUES (?, ?, ?, ?, ?)').bind(String(message.from?.id || ''), message.from?.username || message.from?.first_name || '', text, now, today).run();
 	} catch (e) {
-		if (e.message.includes('no such table')) { await ensureDailyMsgTable(env); }
-		else { console.error('[AI] 存储消息失败:', e.message); }
+		console.error('[AI] 存储消息失败:', e.message);
 	}
 }
 
@@ -313,7 +314,7 @@ async function aiProcessMessage(message, env) {
 	if (!isMainGroup(message.chat.id)) return;
 	if (!message.from || message.from.is_bot) return;
 	const text = (message.text || message.caption || '');
-	if (!text || text.length < 5 || text.startsWith('/')) return;
+	if (!text || text.length < 2 || text.startsWith('/')) return;
 
 	const config = await getAiConfig(env);
 
