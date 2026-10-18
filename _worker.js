@@ -1,23 +1,3 @@
-/**
- * TG Unban Bot — 业务主程序
- *
- * ============================================================
- * 本项目基于 cmliu/CF-Workers-TGUnbanBot 改造
- * 原作者: cmliu (https://github.com/cmliu)
- * 原项目: https://github.com/cmliu/CF-Workers-TGUnbanBot
- *
- * 原版为 Cloudflare Workers 单文件部署；本项目改造为
- * 普通 Node.js 服务器运行，并新增以下功能：
- *   - 违禁词管理（精确/包含匹配、单个词独立规则）
- *   - 自动回复
- *   - Web 管理面板 + Telegram 内联按钮面板
- *   - 群 ID 动态管理
- *   - 命令回复自动删除
- *
- * 感谢原作者的优秀开源工作！
- * ============================================================
- */
-
 // Telegram Bot Token
 let BOT_TOKEN;
 // 群组ID(原始配置串,保留作日志/兼容别名;权威数据源为下方 GROUP_ID_SET)
@@ -88,6 +68,406 @@ const WORD_WARNING_STORAGE_KEY = 'banned_words_v1';
 const AUTO_REPLY_STORAGE_KEY = 'auto_replies_v1';
 const BANNED_WORDS_CONFIG_KEY = 'banned_words_config_v1';
 const BANNED_WORDS_RULES_KEY = 'banned_words_rules_v1';
+// ========================================================
+// AI 智能功能模块 (广告识别 + 情绪监控 + 智能问答 + 每日摘要)
+// ========================================================
+
+const AI_CONFIG_KEY = 'ai_config_v1';
+const FAQ_KEY = 'faq_pairs_v1';
+const AI_LAST_SUMMARY_KEY = 'ai_last_summary_date';
+
+let aiConfig = {
+	adDetection: true,
+	sentimentMonitor: true,
+	faqEnabled: true,
+	dailySummary: true,
+	summaryHour: 23,
+};
+
+async function getAiConfig(env) {
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(AI_CONFIG_KEY).first();
+		if (row) { try { return { ...aiConfig, ...JSON.parse(row.value) }; } catch { return { ...aiConfig }; } }
+		if (env.KV) { try { const raw = await env.KV.get(AI_CONFIG_KEY, { type: 'json' }); return raw ? { ...aiConfig, ...raw } : { ...aiConfig }; } catch {} }
+	}
+	return { ...aiConfig };
+}
+
+async function saveAiConfig(env, config) {
+	const json = JSON.stringify(config);
+	if (isDbReady(env)) {
+		await env.DB.prepare('INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(AI_CONFIG_KEY, json).run();
+	}
+	if (env.KV) { await env.KV.put(AI_CONFIG_KEY, json); }
+}
+
+const HOSTILITY_WARNINGS_KEY = 'hostility_warnings_v1';
+
+async function getHostilityWarnings(env, userId) {
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(HOSTILITY_WARNINGS_KEY).first();
+		if (row) {
+			try {
+				const all = JSON.parse(row.value);
+				return all[String(userId)] || 0;
+			} catch { return 0; }
+		}
+	}
+	return 0;
+}
+
+async function setHostilityWarnings(env, userId, count) {
+	let all = {};
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(HOSTILITY_WARNINGS_KEY).first();
+		if (row) { try { all = JSON.parse(row.value); } catch {} }
+	}
+	all[String(userId)] = count;
+	const json = JSON.stringify(all);
+	if (isDbReady(env)) {
+		await env.DB.prepare('INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(HOSTILITY_WARNINGS_KEY, json).run();
+	}
+	if (env.KV) { await env.KV.put(HOSTILITY_WARNINGS_KEY, json); }
+}
+
+async function getFaqs(env) {
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(FAQ_KEY).first();
+		if (row) { try { return JSON.parse(row.value); } catch { return []; } }
+	}
+	if (env.KV) { try { const raw = await env.KV.get(FAQ_KEY, { type: 'json' }); return raw || []; } catch {} }
+	return [];
+}
+
+async function saveFaqs(env, faqs) {
+	const json = JSON.stringify(faqs);
+	if (isDbReady(env)) {
+		await env.DB.prepare('INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(FAQ_KEY, json).run();
+	}
+	if (env.KV) { await env.KV.put(FAQ_KEY, json); }
+}
+
+// AI 消息分析 (广告+情绪, 一次调用)
+async function aiAnalyzeMessage(text, env) {
+	if (!env.AI) return null;
+	try {
+		const result = await env.AI.run('ai', {
+			messages: [
+				{ role: 'system', content: '你是一个群消息分析器。分析以下消息：1.是否广告/推广/诈骗/引流 2.攻击性等级0-3：0=正常，1=语气不佳，2=辱骂攻击（包含：滚/闭嘴/傻逼/垃圾/废物/狗东西/操你妈/日你妈/他妈的/你爹等攻击家人脏话），3=严重威胁极端侮辱。只返回JSON：{"is_ad":false,"hostility":0,"reason":"简短说明"}' },
+				{ role: 'user', content: text.slice(0, 500) }
+			]
+		});
+		const responseText = extractAiResponseText(result);
+		if (!responseText) return null;
+		const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+		if (jsonMatch) { return JSON.parse(jsonMatch[0]); }
+	} catch (e) { console.error('[AI] 分析失败:', e.message); }
+	return null;
+}
+
+// AI FAQ 匹配
+async function aiMatchFaq(text, faqs, env) {
+	if (!env.AI || faqs.length === 0) return null;
+	try {
+		const faqText = faqs.map((f, i) => `Q${i+1}: ${f.question}\nA${i+1}: ${f.answer}`).join('\n');
+		const result = await env.AI.run('ai', {
+			messages: [
+				{ role: 'system', content: `根据FAQ知识库回答用户问题。如果匹配某个FAQ，返回其答案；如果不匹配，只回复"无匹配"。\n\n${faqText}` },
+				{ role: 'user', content: text.slice(0, 200) }
+			]
+		});
+		const responseText = extractAiResponseText(result);
+		if (responseText && !responseText.includes('无匹配')) { return responseText.trim(); }
+	} catch (e) { console.error('[AI] FAQ匹配失败:', e.message); }
+	return null;
+}
+
+// 确保消息表存在
+async function ensureDailyMsgTable(env) {
+	if (!isDbReady(env)) return;
+	try {
+		await env.DB.prepare('CREATE TABLE IF NOT EXISTS ai_daily_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, tgid TEXT, username TEXT, message_text TEXT, timestamp INTEGER, date TEXT)').run();
+	} catch (e) { /* 表已存在 */ }
+}
+
+// 存储每日消息
+async function storeDailyMessage(message, env) {
+	if (!isDbReady(env)) return;
+	try {
+		const text = (message.text || message.caption || '').slice(0, 1000);
+		if (!text || text.length < 2) return;
+		// 先确保表存在
+		await ensureDailyMsgTable(env);
+		const now = Math.floor(Date.now() / 1000);
+		const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+		await env.DB.prepare('INSERT INTO ai_daily_messages (tgid, username, message_text, timestamp, date) VALUES (?, ?, ?, ?, ?)').bind(String(message.from?.id || ''), message.from?.username || message.from?.first_name || '', text, now, today).run();
+	} catch (e) {
+		console.error('[AI] 存储消息失败:', e.message);
+	}
+}
+
+// 生成每日摘要
+async function generateDailySummary(env, config) {
+	if (!env.AI || !isDbReady(env)) return;
+	const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+	try {
+		const result = await env.DB.prepare('SELECT message_text, username FROM ai_daily_messages WHERE date = ? ORDER BY timestamp ASC LIMIT 200').bind(today).all();
+		const messages = result?.results || [];
+		if (messages.length < 5) return;
+
+		const chatLog = messages.map(m => `${m.username}: ${m.message_text}`).join('\n').slice(0, 3000);
+		const aiResult = await env.AI.run('ai', {
+			messages: [
+				{ role: 'system', content: '你是群聊摘要生成器。根据群聊记录生成简短每日摘要：主要话题、重要信息、有趣内容。中文，不超过200字。' },
+				{ role: 'user', content: `今日群聊记录：\n\n${chatLog}` }
+			]
+		});
+		const summary = extractAiResponseText(aiResult);
+		if (!summary) return;
+
+		const chatId = GROUP_ID_SET[0];
+		if (chatId) {
+			await sendTelegramMessage(chatId, `📋 <b>今日群聊摘要 (${today})</b>\n\n${summary}`, null, false);
+		}
+
+		// 清理7天前的消息
+		await env.DB.prepare("DELETE FROM ai_daily_messages WHERE date < date('now', '-7 days')").run();
+
+		// 标记已发送
+		await env.DB.prepare('INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(AI_LAST_SUMMARY_KEY, today).run();
+		console.log('[AI] 每日摘要已发送');
+	} catch (e) { console.error('[AI] 每日摘要失败:', e.message); }
+}
+
+// 检查是否到了摘要时间
+async function checkAndGenerateSummary(env, config) {
+	if (!config.dailySummary || !config.summaryHour) return;
+	try {
+		const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+		const today = now.toISOString().slice(0, 10);
+
+		if (isDbReady(env)) {
+			const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(AI_LAST_SUMMARY_KEY).first();
+			if (row && row.value === today) return;
+		}
+		if (now.getHours() >= config.summaryHour) { await generateDailySummary(env, config); }
+	} catch (e) { console.error('[AI] 摘要定时检查失败:', e.message); }
+}
+
+// 吵架检测跟踪器 (内存, 每群独立, 只跟踪回复链)
+const argumentTracker = new Map(); // key: chatId → [{fromId, toId, time, hostility}]
+// 独立骂人跟踪器 (5分钟内同一用户3+条敌意消息)
+const independentHostilityTracker = new Map(); // key: `${chatId}_${userId}` → [{time, hostility}]
+
+// 检查是否构成吵架 (5分钟内, 回复链中 3+ 条敌意消息 × 2+ 人互怼)
+// 只统计有明确回复目标的敌意消息, 避免误判正常聊天
+async function checkArgument(chatId, fromId, toId, hostility) {
+	const key = String(chatId);
+	const now = Date.now();
+	if (!argumentTracker.has(key)) argumentTracker.set(key, []);
+	const entries = argumentTracker.get(key);
+	entries.push({ fromId: String(fromId), toId: String(toId), time: now, hostility });
+	// 清理5分钟前的记录
+	const cutoff = now - 5 * 60 * 1000;
+	const recent = entries.filter(e => e.time > cutoff);
+	argumentTracker.set(key, recent);
+	// 只看敌意消息 (hostility >= 2)
+	const hostile = recent.filter(e => e.hostility >= 2);
+	if (hostile.length < 3) return null;
+	// 检查是否存在互怼: A回复B + B回复A 的模式
+	const userIds = new Set();
+	const pairs = new Set(); // "A→B" 格式
+	for (const e of hostile) {
+		userIds.add(e.fromId);
+		pairs.add(`${e.fromId}→${e.toId}`);
+	}
+	// 需要 2+ 不同用户参与
+	if (userIds.size < 2) return null;
+	// 检查是否有双向回复 (A→B 且 B→A), 这才是真正的吵架
+	let hasBidirectional = false;
+	for (const p of pairs) {
+		const [a, b] = p.split('→');
+		if (pairs.has(`${b}→${a}`)) { hasBidirectional = true; break; }
+	}
+	if (!hasBidirectional) return null;
+	// 确认是吵架: 清空记录, 返回参与者
+	argumentTracker.set(key, []);
+	return { users: [...userIds], messages: hostile };
+}
+
+// 独立骂人检测 (5分钟内同一用户3+条敌意消息，不要求回复)
+async function checkIndependentHostility(chatId, userId, hostility) {
+	if (hostility < 2) return null;
+	const key = `${chatId}_${userId}`;
+	const now = Date.now();
+	if (!independentHostilityTracker.has(key)) independentHostilityTracker.set(key, []);
+	const entries = independentHostilityTracker.get(key);
+	entries.push({ time: now, hostility });
+	// 清理5分钟前的记录
+	const cutoff = now - 5 * 60 * 1000;
+	const recent = entries.filter(e => e.time > cutoff);
+	independentHostilityTracker.set(key, recent);
+	if (recent.length >= 3) {
+		// 清空记录，避免重复触发
+		independentHostilityTracker.set(key, []);
+		return { userId: String(userId), count: recent.length };
+	}
+	return null;
+}
+
+// 自动介入
+async function autoIntervene(chatId, env, maxHostility, users) {
+	// Level 2: 发提醒消息
+	await sendTelegramMessage(chatId, '⚠️ <b>请群友保持理性</b>\n\n检测到激烈争论，请冷静讨论，勿人身攻击。多次违规将被禁言。', null, false);
+	console.log(`[AI情绪] 已发送理性提醒 chatId=${chatId}`);
+	// Level 3: 严重敌意 → 禁言参与者 10 分钟
+	if (maxHostility >= 3 && users && users.length > 0) {
+		for (const uid of users) {
+			try {
+				await muteUserInChat(chatId, uid);
+				console.log(`[AI情绪] 已禁言用户 ${uid} (10分钟)`);
+			} catch (e) { console.error(`[AI情绪] 禁言失败 ${uid}:`, e.message); }
+		}
+		const labels = users.map(u => `<code>${escapeHtml(u)}</code>`).join(', ');
+		await sendTelegramMessage(chatId, `🔇 <b>已对相关用户临时禁言 10 分钟</b>\n\n用户: ${labels}\n原因: AI检测到严重攻击性内容`, null, false);
+		// 10分钟后自动解除禁言
+		setTimeout(async () => {
+			for (const uid of users) {
+				try { await restrictUserInChat(chatId, uid); } catch (e) {}
+			}
+			console.log(`[AI情绪] 已解除禁言 users=${users.join(',')}`);
+		}, 10 * 60 * 1000);
+	}
+}
+
+// AI 主处理函数
+async function aiProcessMessage(message, env) {
+	if (!isMainGroup(message.chat.id)) return;
+	if (!message.from || message.from.is_bot) return;
+	const text = (message.text || message.caption || '');
+	if (!text || text.length < 2 || text.startsWith('/')) return;
+
+	const config = await getAiConfig(env);
+
+	// 1. 存储消息(用于每日摘要)
+	if (config.dailySummary) { await storeDailyMessage(message, env); }
+
+	// 2. AI 广告+情绪分析 (有触发条件才调用，省 API)
+	const hasUrl = /https?:\/\/|t\.me|\.top|\.cn|\.com|\.vip/i.test(text);
+	const hasAd = /加我|私聊|微信|vx|wx|扫码|代理|开卡|低价|免费领|送福利/i.test(text);
+	// 扩大触发范围：攻击性词 + 情绪标点 + 阴阳怪气 + 回复场景
+	const hasAggressive = /傻|草|骂|打|杀|滚|蠢|废物|垃圾|sb|nmsl|脑残|智障|畜生|狗|屁|滚蛋|闭嘴|你妈|你爹|孙子|贱|婊|操|日你|stupid|idiot|fuck/i.test(text);
+	const hasEmotionalPunct = /[！!]{3,}|[？?]{3,}/.test(text);
+	const hasSarcasm = /呵呵|就这|菜鸡|辣鸡|丢人|可笑|白嫖|喷子|杠精|跳梁|小丑|装什么|什么玩意/i.test(text);
+	const hasReplyTarget = !!message.reply_to_message;
+	const isLongMsg = text.length > 50;
+	const needsAnalysis = (config.adDetection && (hasUrl || hasAd)) ||
+		(config.sentimentMonitor && (hasAggressive || hasEmotionalPunct || hasSarcasm || (isLongMsg && hasReplyTarget)));
+
+	if (needsAnalysis && env.AI) {
+		const result = await aiAnalyzeMessage(text, env);
+		if (result) {
+			// 广告检测
+			if (config.adDetection && result.is_ad) {
+				const isAdmin = await checkIfUserIsAdminInAnyMainGroup(message.from.id);
+				if (!isAdmin) {
+					await deleteMessage(message.chat.id, message.message_id);
+					const currentWarnings = await getUserWarnings(env, message.from.id);
+					const newCount = currentWarnings + 1;
+					await setUserWarnings(env, message.from.id, newCount);
+					const userLabel = message.from.username ? `@${message.from.username}` : message.from.first_name;
+					if (newCount >= 3) {
+						await banUserPermanently(message.chat.id, message.from.id);
+						await sendTelegramMessage(message.chat.id, `🚫 <b>AI广告检测 - 已封禁</b>\n\n${userLabel} 累计 ${newCount} 次发布广告，已封禁踢出。\nAI原因: ${result.reason}`, null, false);
+					} else {
+						await sendTelegramMessage(message.chat.id, `⚠️ <b>AI广告检测</b>\n\n${userLabel} 的消息被AI判定为广告，已删除。\nAI原因: ${result.reason}\n警告 ${newCount}/3`, null, false);
+					}
+					return;
+				}
+			}
+			// 情绪监控 (hostility 0-3)
+			if (config.sentimentMonitor && result.hostility && result.hostility >= 2) {
+				const hostilityLevel = result.hostility;
+				const userMention = message.from.username ? `@${message.from.username}` : `<a href="tg://user?id=${message.from.id}">${message.from.first_name}</a>`;
+				console.log(`[AI情绪] 攻击性消息 L${hostilityLevel}: ${message.from.id}: ${text.slice(0, 80)}`);
+
+				// 累计警告计数
+				const currentWarns = await getHostilityWarnings(env, message.from.id);
+				const newWarns = currentWarns + 1;
+				await setHostilityWarnings(env, message.from.id, newWarns);
+
+				if (newWarns >= 4) {
+					// 超过3次警告 → 踢出 + 封禁 + 拉黑
+					try {
+						await banUserPermanently(message.chat.id, message.from.id);
+						await markUserGroupStatus(env, message.from.id, '封禁', message.chat.id);
+						await addToBlacklist(message.from.id, env, 'ban', BOT_ID);
+					} catch (e) { console.error('[AI情绪] 封禁失败:', e.message); }
+					await sendTelegramMessage(message.chat.id,
+						`🚫 <b>AI情绪监控 - 已封禁</b>\n\n${userMention} 累计 ${newWarns} 次攻击性消息，已封禁踢出并加入黑名单。\nAI原因: ${result.reason}`,
+						null, false);
+					console.log(`[AI情绪] 已封禁: user=${message.from.id}, warns=${newWarns}`);
+
+				} else if (newWarns === 3) {
+					// 第3次 → 私聊通知管理员 + 群里@所有管理员 + 禁言5分钟
+					try {
+						await muteUserInChat(message.chat.id, message.from.id, 5 * 60);
+					} catch (e) { console.error('[AI情绪] 禁言失败:', e.message); }
+
+					// 群里@所有管理员
+					try {
+						const adminSet = await getMainGroupAdminSet(String(message.chat.id));
+						const adminMentions = adminSet ? [...adminSet].map(id => `<a href="tg://user?id=${id}">@${id}</a>`).join(' ') : '';
+						await sendTelegramMessage(message.chat.id,
+							`🔇 <b>AI警告 3/3 - 已禁言</b>\n\n${userMention} 第3次发布攻击性消息，已禁言5分钟。\nAI原因: ${result.reason}\n再犯将被封禁踢出！\n\n${adminMentions} 请注意!`,
+							null, false);
+					} catch (e) { console.error('[AI情绪] 群通知失败:', e.message); }
+
+					// 私聊通知所有管理员
+					try {
+						const adminSet = await getMainGroupAdminSet(String(message.chat.id));
+						if (adminSet && adminSet.size > 0) {
+							const chatIdRaw = String(message.chat.id).replace('-100', '');
+							const msgLink = `https://t.me/c/${chatIdRaw}/${message.message_id}`;
+							const notifyText = `🚨 <b>AI情绪监控 - 第3次警告</b>\n\n用户: ${userMention}\n等级: ${hostilityLevel}/3\nAI分析: ${result.reason}\n消息: ${escapeHtml((text).slice(0, 200))}\n<a href="${msgLink}">查看消息</a>`;
+							for (const adminId of adminSet) {
+								if (String(adminId) === String(message.from.id)) continue;
+								try { await sendTelegramMessage(String(adminId), notifyText, null, false); } catch (e) {}
+							}
+						}
+					} catch (e) { console.error('[AI情绪] 私聊通知失败:', e.message); }
+					console.log(`[AI情绪] 第3次警告+禁言: user=${message.from.id}`);
+
+				} else {
+					// 第1-2次 → 群里@用户警告
+					await sendTelegramMessage(message.chat.id,
+						`⚠️ <b>AI情绪警告 ${newWarns}/3</b>\n\n${userMention} 请注意言行！\nAI原因: ${result.reason}\n累计3次将被禁言，超过3次将被封禁。`,
+						null, false);
+					console.log(`[AI情绪] 警告 ${newWarns}/3: user=${message.from.id}`);
+				}
+			}
+		}
+	}
+
+	// 3. 智能问答
+	if (config.faqEnabled && env.AI) {
+		const trimmed = text.trim();
+		const isQuestion = /[?？]$/.test(trimmed) || /^(怎么|为什么|如何|什么|哪|是不是|能不能|可以吗|请问|帮我|有没有|多少)/.test(trimmed);
+		if (isQuestion) {
+			const faqs = await getFaqs(env);
+			if (faqs.length > 0) {
+				const answer = await aiMatchFaq(trimmed, faqs, env);
+				if (answer) {
+					await sendTelegramMessage(message.chat.id, `💬 <b>智能问答</b>\n\n${answer}`, null, message.message_id, true);
+				}
+			}
+		}
+	}
+
+	// 4. 定时摘要检查
+	if (config.dailySummary) { await checkAndGenerateSummary(env, config); }
+}
+
 const GROUP_IDS_KEY = 'group_ids_v1';
 
 // 违禁词配置（运行时可变，存 DB）
@@ -1750,9 +2130,12 @@ export default {
 					if (!consumed) {
 						const consumed2 = await handleClearWarnCallbackQuery(update.callback_query, env);
 						if (!consumed2) {
-							const consumed3 = await handlePanelCallbackQuery(update.callback_query, env);
+							const consumed3 = await handleBannedWordCallbackQuery(update.callback_query, env);
 							if (!consumed3) {
-								await handleAdCallbackQuery(update.callback_query, env);
+								const consumed4 = await handlePanelCallbackQuery(update.callback_query, env);
+								if (!consumed4) {
+									await handleAdCallbackQuery(update.callback_query, env);
+								}
 							}
 						}
 					}
@@ -1849,6 +2232,9 @@ async function handleInitialization(request) {
 				{ command: "spam", description: "回复消息添加用户到黑名单 (管理员)" },
 				{ command: "check", description: "查询用户封禁状态 (管理员)" },
 				{ command: "addwords", description: "添加违禁词 (管理员)" },
+			{ command: "addfaq", description: "添加FAQ问答 (管理员)" },
+			{ command: "delfaq", description: "删除FAQ问答 (管理员)" },
+			{ command: "listfaq", description: "查看FAQ列表 (管理员)" },
 				{ command: "delwords", description: "删除违禁词 (管理员)" },
 				{ command: "listwords", description: "查看所有违禁词 (管理员)" },
 				{ command: "clearwarn", description: "清除违禁词警告 (管理员)" },
@@ -2569,6 +2955,13 @@ async function handleMessage(message, env) {
 		console.error('[违禁词] 检测异常:', error.message);
 	}
 
+	// AI 智能处理: 广告识别 + 情绪监控 + 智能问答 + 消息存储
+	try {
+		await aiProcessMessage(message, env);
+	} catch (error) {
+		console.error('[AI] 处理异常:', error.message);
+	}
+
 	// 管理员: /addgroup - 添加群 ID 到联ban范围
 	if (text && text.trim().startsWith('/addgroup')) {
 		if (message.chat.type !== 'private' && !(await checkIfUserIsAdminInChat(userId, chatId))) return;
@@ -2675,6 +3068,7 @@ async function handleMessage(message, env) {
 				[{ text: '📊 概览统计', callback_data: 'pnl:overview' }, { text: '⚙️ Bot 设置', callback_data: 'pnl:settings' }],
 				[{ text: '🚫 违禁词管理', callback_data: 'pnl:words' }, { text: '⚠️ 警告记录', callback_data: 'pnl:warnings' }],
 				[{ text: '📋 联网黑名单', callback_data: 'pnl:blacklist' }, { text: '💬 自动回复', callback_data: 'pnl:autoreply' }],
+				[{ text: '🤖 AI 智能功能', callback_data: 'pnl:ai' }],
 				[{ text: '👥 群 ID 管理', callback_data: 'pnl:groups' }]
 			]
 		};
@@ -2913,12 +3307,27 @@ async function handleMessage(message, env) {
 			}
 		}
 		await saveBannedWords(env, current);
-		let msg = `✅ 已添加违禁词: ${added.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
-		if (skipped.length > 0) {
-			msg += `\n⚠️ 已存在(跳过): ${skipped.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
+		if (added.length > 0) {
+			// 为每个新添加的词显示处罚方式选择按钮
+			for (const w of added) {
+				const display = w.startsWith('"') && w.endsWith('"') ? w.slice(1, -1) : w;
+				const keyboard = {
+					inline_keyboard: [
+						[{ text: '🔇 禁言', callback_data: `bw:t:mute:${w}` }],
+						[{ text: '👢 踢出', callback_data: `bw:t:kick:${w}` }],
+						[{ text: '🔨 封禁+拉黑', callback_data: `bw:t:ban:${w}` }]
+					]
+				};
+				const skipText = skipped.length > 0 ? `\n⚠️ 已存在(跳过): ${skipped.map(s => '<code>' + escapeHtml(s) + '</code>').join(', ')}` : '';
+				await sendTelegramMessage(chatId, `✅ 已添加违禁词: <code>${escapeHtml(display)}</code>\n请选择处罚方式：${skipText}`, JSON.stringify(keyboard), null, true);
+			}
+		} else {
+			let msg = `⚠️ 全部已存在，未添加新词`;
+			if (skipped.length > 0) {
+				msg += `: ${skipped.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
+			}
+			await sendTelegramMessage(chatId, msg, null, null, true);
 		}
-		msg += `\n\n当前共 <b>${current.length}</b> 个违禁词`;
-		await sendTelegramMessage(chatId, msg, null, null, true);
 		return;
 	}
 
@@ -2945,6 +3354,12 @@ async function handleMessage(message, env) {
 			}
 		}
 		await saveBannedWords(env, current);
+		// 清理已删除词的独立规则
+		for (const w of removed) {
+			const dw = w.startsWith('"') && w.endsWith('"') ? w.slice(1, -1) : w;
+			await saveWordRule(env, dw, null);
+			await saveWordRule(env, w, null);
+		}
 		let msg = `✅ 已删除违禁词: ${removed.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
 		if (notFound.length > 0) {
 			msg += `\n⚠️ 未找到: ${notFound.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`;
@@ -2964,13 +3379,79 @@ async function handleMessage(message, env) {
 			await sendTelegramMessage(chatId, 'ℹ️ 当前没有违禁词。使用 <code>/addwords 词1,词2</code> 添加', null, null, true);
 			return;
 		}
+		const rules = await getWordRules(env);
 		const wordList = words.map((w, i) => {
 			const isExact = w.startsWith('"') && w.endsWith('"');
 			const label = isExact ? '精确' : '包含';
 			const display = isExact ? w.slice(1, -1) : w;
-			return `${i + 1}. <code>${escapeHtml(display)}</code> [${label}匹配]`;
+			const rule = rules[display] || rules[w];
+			let ruleTag = '';
+			if (rule) {
+				const pt = rule.punishType === 'mute' ? '🔇禁言' : rule.punishType === 'ban' ? '🔨封禁' : '👢踢出';
+				const wl = rule.warningLimit || 3;
+				ruleTag = ` | ${pt} ${wl}次`;
+			} else {
+				ruleTag = ` | 默认(踢出 3次)`;
+			}
+			return `${i + 1}. <code>${escapeHtml(display)}</code> [${label}匹配]${ruleTag}`;
 		}).join('\n');
-		await sendTelegramMessage(chatId, `📋 <b>违禁词列表</b> (共 ${words.length} 个)\n\n${wordList}\n\n⚠️ 触发 ${WORD_WARNING_LIMIT} 次永久封禁\n💡 <code>"词"</code> = 精确匹配（整条消息等于该词）\n💡 <code>词</code> = 包含匹配（消息中出现该词即可）\n\n使用 <code>/addwords</code> 添加 / <code>/delwords</code> 删除`, null, null, true);
+		await sendTelegramMessage(chatId, `📋 <b>违禁词列表</b> (共 ${words.length} 个)\n\n${wordList}\n\n💡 <code>"词"</code> = 精确匹配（整条消息等于该词）\n💡 <code>词</code> = 包含匹配（消息中出现该词即可）\n\n使用 <code>/addwords</code> 添加 / <code>/delwords</code> 删除`, null, null, true);
+		return;
+	}
+
+	// 管理员: /addfaq 问题 | 答案 — 添加FAQ
+	const addFaqCmd = parseCommand(text, 'addfaq');
+	if (addFaqCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		const args = addFaqCmd.args.trim();
+		if (!args || !args.includes('|')) {
+			await sendTelegramMessage(chatId, '❌ 使用方法: <code>/addfaq 问题 | 答案</code>', null, null, true);
+			return;
+		}
+		const [q, ...aParts] = args.split('|');
+		const question = q.trim();
+		const answer = aParts.join('|').trim();
+		if (!question || !answer) {
+			await sendTelegramMessage(chatId, '❌ 问题和答案不能为空', null, null, true);
+			return;
+		}
+		const faqs = await getFaqs(env);
+		faqs.push({ question, answer });
+		await saveFaqs(env, faqs);
+		await sendTelegramMessage(chatId, `✅ 已添加FAQ #${faqs.length}\n<b>Q:</b> ${escapeHtml(question)}\n<b>A:</b> ${escapeHtml(answer)}`, null, null, true);
+		return;
+	}
+
+	// 管理员: /delfaq <序号> — 删除FAQ
+	const delFaqCmd = parseCommand(text, 'delfaq');
+	if (delFaqCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		const idx = parseInt(delFaqCmd.args.trim()) - 1;
+		const faqs = await getFaqs(env);
+		if (isNaN(idx) || idx < 0 || idx >= faqs.length) {
+			await sendTelegramMessage(chatId, '❌ 序号无效', null, null, true);
+			return;
+		}
+		const removed = faqs.splice(idx, 1)[0];
+		await saveFaqs(env, faqs);
+		await sendTelegramMessage(chatId, `✅ 已删除FAQ: ${escapeHtml(removed.question)}`, null, null, true);
+		return;
+	}
+
+	// 管理员: /listfaq — 列出所有FAQ
+	const listFaqCmd = parseCommand(text, 'listfaq');
+	if (listFaqCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		const faqs = await getFaqs(env);
+		if (faqs.length === 0) {
+			await sendTelegramMessage(chatId, 'ℹ️ 当前没有FAQ。使用 <code>/addfaq 问题 | 答案</code> 添加', null, null, true);
+			return;
+		}
+		const faqList = faqs.map((f, i) => `${i + 1}. <b>Q:</b> ${escapeHtml(f.question)}\n   <b>A:</b> ${escapeHtml(f.answer)}`).join('\n\n');
+		await sendTelegramMessage(chatId, `📋 <b>FAQ列表</b> (共 ${faqs.length} 条)\n\n${faqList}`, null, null, true);
 		return;
 	}
 
@@ -3816,7 +4297,30 @@ async function checkBannedWords(message, env) {
 		const punishType = effectiveConfig.punishType || 'kick';
 		const banDuration = effectiveConfig.banDuration || 0;
 
-		if (punishType === 'ban') {
+		if (punishType === 'mute') {
+			// 禁言（restrictChatMember，不踢出群）
+			try {
+				await muteUserInChat(chatId, userId);
+				await markUserGroupStatus(env, userId, '禁言', chatId);
+			} catch (e) {
+				console.error('[违禁词] 禁言失败:', e.message);
+			}
+			const muteDurationText = banDuration > 0 ? `临时禁言 ${Math.round(banDuration / 60)} 分钟` : '永久禁言';
+			await sendTelegramMessage(chatId, `🔇 <b>用户已被${muteDurationText}</b>\n\n${userLabel} 累计触发违禁词 <b>${newCount}</b> 次，已达上限(${limit}次)。\n已${muteDurationText}。\n命中词：${displayWords.map(w => '<code>' + escapeHtml(w) + '</code>').join(', ')}`, null, false);
+
+			// 临时禁言：到期后自动解除
+			if (banDuration > 0) {
+				setTimeout(async () => {
+					try {
+						await restrictUserInChat(chatId, userId);
+						await markUserGroupStatus(env, userId, '健康', chatId);
+						console.log(`[违禁词] 临时禁言到期，已解除 user=${userId}`);
+					} catch (e) {
+						console.error('[违禁词] 自动解除禁言失败:', e.message);
+					}
+				}, banDuration * 1000);
+			}
+		} else if (punishType === 'ban') {
 			// 封禁 + 加入联网黑名单
 			try {
 				await banUserPermanently(chatId, userId);
@@ -4765,7 +5269,11 @@ function extractAiResponseText(result) {
 		const first = result.choices[0];
 		if (first) {
 			if (typeof first.text === 'string') return first.text;
-			if (first.message && typeof first.message.content === 'string') return first.message.content;
+			if (first.message) {
+			if (typeof first.message.content === 'string' && first.message.content) return first.message.content;
+			if (typeof first.message.reasoning === 'string' && first.message.reasoning) return first.message.reasoning;
+			if (typeof first.message.reasoning_content === 'string' && first.message.reasoning_content) return first.message.reasoning_content;
+		}
 		}
 	}
 	return '';
@@ -5482,6 +5990,90 @@ async function handleAdCommand(message, env, preAssessedThreat = null, options =
 	}
 
 	await saveAdVoteState(env, state);
+}
+
+// ========================================================
+// 违禁词规则配置回调处理 (bw: 前缀)
+// ========================================================
+async function handleBannedWordCallbackQuery(callbackQuery, env) {
+	const data = callbackQuery.data || '';
+	if (!data.startsWith('bw:')) return false;
+
+	const message = callbackQuery.message;
+	const chatId = message?.chat?.id;
+	const operatorId = callbackQuery.from.id;
+
+	// 仅管理员可操作
+	if (!await checkCommandAdmin(operatorId, { chat: { id: chatId, type: message?.chat?.type } })) {
+		try { await answerCallbackQuery(callbackQuery.id, '仅限管理员操作', true); } catch (_) { }
+		return true;
+	}
+
+	const parts = data.split(':');
+	const step = parts[1]; // 't' = 选处罚方式, 'c' = 选触发次数
+
+	try {
+		if (step === 't') {
+			// 用户选择了处罚方式，现在显示次数选择
+			const punishType = parts[2]; // mute/kick/ban
+			const word = parts.slice(3).join(':'); // 词可能含冒号
+			if (!word) { await answerCallbackQuery(callbackQuery.id, '参数错误', true); return true; }
+
+			const display = word.startsWith('"') && word.endsWith('"') ? word.slice(1, -1) : word;
+			const punishLabel = punishType === 'mute' ? '🔇 禁言' : punishType === 'ban' ? '🔨 封禁+拉黑' : '👢 踢出';
+
+			const keyboard = {
+				inline_keyboard: [
+					[
+						{ text: '1次', callback_data: `bw:c:1:${punishType}:${word}` },
+						{ text: '2次', callback_data: `bw:c:2:${punishType}:${word}` },
+						{ text: '3次', callback_data: `bw:c:3:${punishType}:${word}` },
+					],
+					[
+						{ text: '4次', callback_data: `bw:c:4:${punishType}:${word}` },
+						{ text: '5次', callback_data: `bw:c:5:${punishType}:${word}` },
+						{ text: '10次', callback_data: `bw:c:10:${punishType}:${word}` },
+					]
+				]
+			};
+
+			await answerCallbackQuery(callbackQuery.id);
+			await editMessageText(chatId, message.message_id,
+				`✅ 违禁词: <code>${escapeHtml(display)}</code>\n处罚方式: ${punishLabel}\n请选择触发次数（达到此次后执行处罚）：`,
+				JSON.stringify(keyboard));
+		} else if (step === 'c') {
+			// 用户选择了触发次数，保存规则
+			const count = parseInt(parts[2]);
+			const punishType = parts[3]; // mute/kick/ban
+			const word = parts.slice(4).join(':');
+			if (!word || !count) { await answerCallbackQuery(callbackQuery.id, '参数错误', true); return true; }
+
+			const display = word.startsWith('"') && word.endsWith('"') ? word.slice(1, -1) : word;
+			const punishLabel = punishType === 'mute' ? '🔇 禁言' : punishType === 'ban' ? '🔨 封禁+拉黑' : '👢 踢出';
+
+			const rule = { punishType, warningLimit: count, banDuration: 0 };
+			await saveWordRule(env, display, rule);
+			// 同时用原始词（含引号）也存一份，防止精确匹配词查不到
+			if (word !== display) {
+				await saveWordRule(env, word, rule);
+			}
+
+			await answerCallbackQuery(callbackQuery.id, `已保存: ${punishLabel} ${count}次`);
+			await editMessageText(chatId, message.message_id,
+				`✅ <b>违禁词规则已保存</b>\n\n违禁词: <code>${escapeHtml(display)}</code>\n处罚: ${punishLabel}\n触发次数: ${count}次`);
+
+			// 20秒后自动删除
+			setTimeout(async () => {
+				try { await deleteMessage(chatId, message.message_id); } catch (_) {}
+			}, 20000);
+		} else {
+			await answerCallbackQuery(callbackQuery.id, '无效操作', true);
+		}
+	} catch (error) {
+		console.error('[违禁词规则] 回调处理异常:', error.message);
+		try { await answerCallbackQuery(callbackQuery.id, `操作失败: ${String(error.message).slice(0, 80)}`, true); } catch (_) { }
+	}
+	return true;
 }
 
 async function handleAdCallbackQuery(callbackQuery, env) {
@@ -6312,6 +6904,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					[{ text: '📊 概览统计', callback_data: 'pnl:overview' }, { text: '⚙️ Bot 设置', callback_data: 'pnl:settings' }],
 					[{ text: '🚫 违禁词管理', callback_data: 'pnl:words' }, { text: '⚠️ 警告记录', callback_data: 'pnl:warnings' }],
 					[{ text: '📋 联网黑名单', callback_data: 'pnl:blacklist' }, { text: '💬 自动回复', callback_data: 'pnl:autoreply' }],
+				[{ text: '🤖 AI 智能功能', callback_data: 'pnl:ai' }],
 					[{ text: '👥 群 ID 管理', callback_data: 'pnl:groups' }]
 				]
 			};
@@ -6359,39 +6952,19 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					const rule = rules[w];
 					let ruleTag = '';
 					if (rule) {
-						const pt = rule.punishType === 'ban' ? '封禁' : '踢出';
+						const pt = rule.punishType === 'mute' ? '🔇禁言' : rule.punishType === 'ban' ? '🔨封禁' : '👢踢出';
 						const dl = rule.banDuration > 0 ? `临时${Math.round(rule.banDuration / 60)}分钟` : '永久';
-						ruleTag = ` | ${pt} ${dl} | ${rule.warningLimit || config.warningLimit || WORD_WARNING_LIMIT}次`;
+						ruleTag = ` | ${pt} ${dl} | ${rule.warningLimit || 3}次`;
+					} else {
+						ruleTag = ` | 默认(踢出 3次)`;
 					}
 					return `${i + 1}. <code>${escapeHtml(display)}</code> [${label}匹配]${ruleTag}`;
 				}).join('\n');
-			const punishText = config.punishType === 'ban' ? '封禁+拉黑' : '仅踢出';
-			const durationText = config.banDuration > 0 ? `临时${Math.round(config.banDuration / 60)}分钟` : '永久';
 			const msg = '🚫 <b>违禁词管理</b>\n\n' +
-				'<b>全局配置:</b>\n' +
-				'状态: ' + (config.enabled ? '✅ 启用' : '❌ 关闭') + '\n' +
-				'警告上限: <b>' + (config.warningLimit || WORD_WARNING_LIMIT) + '</b> 次\n' +
-				'处罚方式: <b>' + punishText + '</b>\n' +
-				'处罚时长: <b>' + durationText + '</b>\n\n' +
 				'<b>违禁词列表:</b>\n' + wordList + '\n\n' +
 				'💡 点击下方按钮可设置单个违禁词规则\n' +
 				'添加: /addwords 词1,词2  删除: /delwords 词';
 			const buttons = [];
-			if (config.enabled) {
-				buttons.push([{ text: '🔴 关闭违禁词', callback_data: 'pnl:bwcfg:off' }]);
-			} else {
-				buttons.push([{ text: '🟢 启用违禁词', callback_data: 'pnl:bwcfg:on' }]);
-			}
-			buttons.push([
-				{ text: (config.punishType === 'kick' ? '🔘' : '⚪') + ' 仅踢出', callback_data: 'pnl:bwcfg:type:kick' },
-				{ text: (config.punishType === 'ban' ? '🔘' : '⚪') + ' 封禁+拉黑', callback_data: 'pnl:bwcfg:type:ban' }
-			]);
-			buttons.push([
-				{ text: (config.banDuration === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwcfg:dur:0' },
-				{ text: (config.banDuration === 300 ? '🔘' : '⚪') + ' 5分钟', callback_data: 'pnl:bwcfg:dur:300' },
-				{ text: (config.banDuration === 1800 ? '🔘' : '⚪') + ' 30分钟', callback_data: 'pnl:bwcfg:dur:1800' },
-				{ text: (config.banDuration === 86400 ? '🔘' : '⚪') + ' 1天', callback_data: 'pnl:bwcfg:dur:86400' }
-			]);
 			// 每个违禁词一个设置按钮
 			if (words.length > 0) {
 				const wordButtons = words.map((w, i) => {
@@ -6454,7 +7027,145 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			return true;
 		}
 
-		// 单个违禁词设置页面
+	// AI 智能功能面板
+	if (action === 'ai') {
+		const config = await getAiConfig(env);
+		const faqs = await getFaqs(env);
+		const aiStatus = env.AI ? '✅ 已启用' : '❌ 未配置API Key';
+		const msg = '🤖 <b>AI 智能功能</b>\n\n' +
+			'AI引擎: ' + aiStatus + '\n' +
+			'FAQ数量: <b>' + faqs.length + '</b> 条\n\n' +
+			'<b>功能开关:</b>\n' +
+			'广告识别: ' + (config.adDetection ? '✅' : '❌') + '\n' +
+			'情绪监控: ' + (config.sentimentMonitor ? '✅' : '❌') + '\n' +
+			'智能问答: ' + (config.faqEnabled ? '✅' : '❌') + '\n' +
+			'每日摘要: ' + (config.dailySummary ? '✅' : '❌') + '\n' +
+			'摘要时间: <b>' + config.summaryHour + ':00</b>';
+		const buttons = [
+			[
+				{ text: (config.adDetection ? '✅' : '❌') + ' 广告识别', callback_data: 'pnl:aitg:adDetection' },
+				{ text: (config.sentimentMonitor ? '✅' : '❌') + ' 情绪监控', callback_data: 'pnl:aitg:sentimentMonitor' }
+			],
+			[
+				{ text: (config.faqEnabled ? '✅' : '❌') + ' 智能问答', callback_data: 'pnl:aitg:faqEnabled' },
+				{ text: (config.dailySummary ? '✅' : '❌') + ' 每日摘要', callback_data: 'pnl:aitg:dailySummary' }
+			],
+			[
+				{ text: (config.summaryHour === 22 ? '🔘' : '⚪') + ' 22:00', callback_data: 'pnl:aihr:22' },
+				{ text: (config.summaryHour === 23 ? '🔘' : '⚪') + ' 23:00', callback_data: 'pnl:aihr:23' },
+				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
+			],
+			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			backButton
+		];
+		const markup = { inline_keyboard: buttons };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
+		return true;
+	}
+
+	// AI 配置开关
+	if (action === 'aitg') {
+		const key = parts[2];
+		const config = await getAiConfig(env);
+		if (config[key] !== undefined) { config[key] = !config[key]; await saveAiConfig(env, config); }
+		// 重新渲染（复用 ai 逻辑）
+		const faqs = await getFaqs(env);
+		const aiStatus = env.AI ? '✅ 已启用' : '❌ 未配置API Key';
+		const msg = '🤖 <b>AI 智能功能</b>\n\n' +
+			'AI引擎: ' + aiStatus + '\n' +
+			'FAQ数量: <b>' + faqs.length + '</b> 条\n\n' +
+			'<b>功能开关:</b>\n' +
+			'广告识别: ' + (config.adDetection ? '✅' : '❌') + '\n' +
+			'情绪监控: ' + (config.sentimentMonitor ? '✅' : '❌') + '\n' +
+			'智能问答: ' + (config.faqEnabled ? '✅' : '❌') + '\n' +
+			'每日摘要: ' + (config.dailySummary ? '✅' : '❌') + '\n' +
+			'摘要时间: <b>' + config.summaryHour + ':00</b>';
+		const buttons = [
+			[
+				{ text: (config.adDetection ? '✅' : '❌') + ' 广告识别', callback_data: 'pnl:aitg:adDetection' },
+				{ text: (config.sentimentMonitor ? '✅' : '❌') + ' 情绪监控', callback_data: 'pnl:aitg:sentimentMonitor' }
+			],
+			[
+				{ text: (config.faqEnabled ? '✅' : '❌') + ' 智能问答', callback_data: 'pnl:aitg:faqEnabled' },
+				{ text: (config.dailySummary ? '✅' : '❌') + ' 每日摘要', callback_data: 'pnl:aitg:dailySummary' }
+			],
+			[
+				{ text: (config.summaryHour === 22 ? '🔘' : '⚪') + ' 22:00', callback_data: 'pnl:aihr:22' },
+				{ text: (config.summaryHour === 23 ? '🔘' : '⚪') + ' 23:00', callback_data: 'pnl:aihr:23' },
+				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
+			],
+			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			backButton
+		];
+		const markup = { inline_keyboard: buttons };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id, '✅ 已更新'); } catch (_) {}
+		return true;
+	}
+
+	// AI 摘要时间设置
+	if (action === 'aihr') {
+		const hr = parseInt(parts[2]);
+		const config = await getAiConfig(env);
+		if (!isNaN(hr)) { config.summaryHour = hr; await saveAiConfig(env, config); }
+		// 重新渲染
+		const faqs = await getFaqs(env);
+		const aiStatus = env.AI ? '✅ 已启用' : '❌ 未配置API Key';
+		const msg = '🤖 <b>AI 智能功能</b>\n\n' +
+			'AI引擎: ' + aiStatus + '\n' +
+			'FAQ数量: <b>' + faqs.length + '</b> 条\n\n' +
+			'<b>功能开关:</b>\n' +
+			'广告识别: ' + (config.adDetection ? '✅' : '❌') + '\n' +
+			'情绪监控: ' + (config.sentimentMonitor ? '✅' : '❌') + '\n' +
+			'智能问答: ' + (config.faqEnabled ? '✅' : '❌') + '\n' +
+			'每日摘要: ' + (config.dailySummary ? '✅' : '❌') + '\n' +
+			'摘要时间: <b>' + config.summaryHour + ':00</b>';
+		const buttons = [
+			[
+				{ text: (config.adDetection ? '✅' : '❌') + ' 广告识别', callback_data: 'pnl:aitg:adDetection' },
+				{ text: (config.sentimentMonitor ? '✅' : '❌') + ' 情绪监控', callback_data: 'pnl:aitg:sentimentMonitor' }
+			],
+			[
+				{ text: (config.faqEnabled ? '✅' : '❌') + ' 智能问答', callback_data: 'pnl:aitg:faqEnabled' },
+				{ text: (config.dailySummary ? '✅' : '❌') + ' 每日摘要', callback_data: 'pnl:aitg:dailySummary' }
+			],
+			[
+				{ text: (config.summaryHour === 22 ? '🔘' : '⚪') + ' 22:00', callback_data: 'pnl:aihr:22' },
+				{ text: (config.summaryHour === 23 ? '🔘' : '⚪') + ' 23:00', callback_data: 'pnl:aihr:23' },
+				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
+			],
+			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			backButton
+		];
+		const markup = { inline_keyboard: buttons };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id, '✅ 已更新'); } catch (_) {}
+		return true;
+	}
+
+	// FAQ 列表面板
+	if (action === 'faq') {
+		const faqs = await getFaqs(env);
+		let faqList;
+		if (faqs.length === 0) {
+			faqList = '暂无FAQ\n使用 /addfaq 问题 | 答案 添加';
+		} else {
+			faqList = faqs.map((f, i) => `${i + 1}. Q: ${escapeHtml(f.question)}\n   A: ${escapeHtml(f.answer)}`).join('\n\n');
+		}
+		const msg = '💬 <b>FAQ管理</b> (' + faqs.length + '条)\n\n' + faqList;
+		const buttons = [backButton];
+		const markup = { inline_keyboard: buttons };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
+		return true;
+	}
+
+			// 单个违禁词设置页面
 		if (action === 'bwri') {
 			const idx = parseInt(parts[2]);
 			const words = await getBannedWords(env);
@@ -6471,24 +7182,25 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			const ePunish = rule.punishType || config.punishType || 'kick';
 			const eBanDur = rule.banDuration !== undefined ? rule.banDuration : config.banDuration;
 			const eWarn = rule.warningLimit || config.warningLimit || WORD_WARNING_LIMIT;
+			const punishLabel = ePunish === 'mute' ? '🔇 禁言' : ePunish === 'ban' ? '🔨 封禁+拉黑' : '👢 踢出';
 			const msg = '⚙️ <b>违禁词设置</b>\n\n' +
 				'词汇: <code>' + escapeHtml(display) + '</code>\n' +
 				'匹配: ' + (word.startsWith('"') ? '精确' : '包含') + '\n' +
-				(hasCustom ? '⚡ 使用独立规则' : '📋 使用全局默认') + '\n\n' +
-				'警告上限: <b>' + eWarn + '</b> 次\n' +
-				'处罚方式: <b>' + (ePunish === 'ban' ? '封禁+拉黑' : '仅踢出') + '</b>\n' +
+				(hasCustom ? '⚡ 使用独立规则' : '📋 未设置(默认踢出3次)') + '\n\n' +
+				'触发次数: <b>' + eWarn + '</b> 次\n' +
+				'处罚方式: <b>' + punishLabel + '</b>\n' +
 				'处罚时长: <b>' + (eBanDur > 0 ? '临时' + Math.round(eBanDur / 60) + '分钟' : '永久') + '</b>';
 			const buttons = [
 				[
 					{ text: (eWarn === 1 ? '🔘' : '⚪') + ' 1次', callback_data: 'pnl:bwrs:' + idx + ':warn:1' },
 					{ text: (eWarn === 2 ? '🔘' : '⚪') + ' 2次', callback_data: 'pnl:bwrs:' + idx + ':warn:2' },
 					{ text: (eWarn === 3 ? '🔘' : '⚪') + ' 3次', callback_data: 'pnl:bwrs:' + idx + ':warn:3' },
-					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' }
+					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' },
+					{ text: (eWarn === 10 ? '🔘' : '⚪') + ' 10次', callback_data: 'pnl:bwrs:' + idx + ':warn:10' }
 				],
-				[
-					{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 仅踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' },
-					{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }
-				],
+				[{ text: (ePunish === 'mute' ? '🔘' : '⚪') + ' 🔇 禁言', callback_data: 'pnl:bwrs:' + idx + ':type:mute' }],
+				[{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 👢 踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' }],
+				[{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 🔨 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }],
 				[
 					{ text: (eBanDur === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwrs:' + idx + ':dur:0' },
 					{ text: (eBanDur === 300 ? '🔘' : '⚪') + ' 5分钟', callback_data: 'pnl:bwrs:' + idx + ':dur:300' },
@@ -6497,7 +7209,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				]
 			];
 			if (hasCustom) {
-				buttons.push([{ text: '🗑 恢复全局默认', callback_data: 'pnl:bwrs:' + idx + ':reset' }]);
+				buttons.push([{ text: '🗑 清除规则', callback_data: 'pnl:bwrs:' + idx + ':reset' }]);
 			}
 			buttons.push([{ text: '⬅️ 返回违禁词列表', callback_data: 'pnl:words' }]);
 			const markup = { inline_keyboard: buttons };
@@ -6528,7 +7240,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			} else if (subAction === 'warn' && parts[4]) {
 				const w = parseInt(parts[4]);
 				if (w >= 1 && w <= 10) { rule.warningLimit = w; changed = true; }
-			} else if (subAction === 'type' && (parts[4] === 'kick' || parts[4] === 'ban')) {
+			} else if (subAction === 'type' && (parts[4] === 'mute' || parts[4] === 'kick' || parts[4] === 'ban')) {
 				rule.punishType = parts[4]; changed = true;
 			} else if (subAction === 'dur' && parts[4]) {
 				rule.banDuration = parseInt(parts[4]); changed = true;
@@ -6546,24 +7258,25 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			const ePunish = newRule.punishType || config.punishType || 'kick';
 			const eBanDur = newRule.banDuration !== undefined ? newRule.banDuration : config.banDuration;
 			const eWarn = newRule.warningLimit || config.warningLimit || WORD_WARNING_LIMIT;
+			const punishLabel = ePunish === 'mute' ? '🔇 禁言' : ePunish === 'ban' ? '🔨 封禁+拉黑' : '👢 踢出';
 			const msg = '⚙️ <b>违禁词设置</b>\n\n' +
 				'词汇: <code>' + escapeHtml(display) + '</code>\n' +
 				'匹配: ' + (word.startsWith('"') ? '精确' : '包含') + '\n' +
-				(hasCustom ? '⚡ 使用独立规则' : '📋 使用全局默认') + '\n\n' +
-				'警告上限: <b>' + eWarn + '</b> 次\n' +
-				'处罚方式: <b>' + (ePunish === 'ban' ? '封禁+拉黑' : '仅踢出') + '</b>\n' +
+				(hasCustom ? '⚡ 使用独立规则' : '📋 未设置(默认踢出3次)') + '\n\n' +
+				'触发次数: <b>' + eWarn + '</b> 次\n' +
+				'处罚方式: <b>' + punishLabel + '</b>\n' +
 				'处罚时长: <b>' + (eBanDur > 0 ? '临时' + Math.round(eBanDur / 60) + '分钟' : '永久') + '</b>';
 			const buttons = [
 				[
 					{ text: (eWarn === 1 ? '🔘' : '⚪') + ' 1次', callback_data: 'pnl:bwrs:' + idx + ':warn:1' },
 					{ text: (eWarn === 2 ? '🔘' : '⚪') + ' 2次', callback_data: 'pnl:bwrs:' + idx + ':warn:2' },
 					{ text: (eWarn === 3 ? '🔘' : '⚪') + ' 3次', callback_data: 'pnl:bwrs:' + idx + ':warn:3' },
-					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' }
+					{ text: (eWarn === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwrs:' + idx + ':warn:5' },
+					{ text: (eWarn === 10 ? '🔘' : '⚪') + ' 10次', callback_data: 'pnl:bwrs:' + idx + ':warn:10' }
 				],
-				[
-					{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 仅踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' },
-					{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }
-				],
+				[{ text: (ePunish === 'mute' ? '🔘' : '⚪') + ' 🔇 禁言', callback_data: 'pnl:bwrs:' + idx + ':type:mute' }],
+				[{ text: (ePunish === 'kick' ? '🔘' : '⚪') + ' 👢 踢出', callback_data: 'pnl:bwrs:' + idx + ':type:kick' }],
+				[{ text: (ePunish === 'ban' ? '🔘' : '⚪') + ' 🔨 封禁+拉黑', callback_data: 'pnl:bwrs:' + idx + ':type:ban' }],
 				[
 					{ text: (eBanDur === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwrs:' + idx + ':dur:0' },
 					{ text: (eBanDur === 300 ? '🔘' : '⚪') + ' 5分钟', callback_data: 'pnl:bwrs:' + idx + ':dur:300' },
@@ -6572,7 +7285,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				]
 			];
 			if (hasCustom) {
-				buttons.push([{ text: '🗑 恢复全局默认', callback_data: 'pnl:bwrs:' + idx + ':reset' }]);
+				buttons.push([{ text: '🗑 清除规则', callback_data: 'pnl:bwrs:' + idx + ':reset' }]);
 			}
 			buttons.push([{ text: '⬅️ 返回违禁词列表', callback_data: 'pnl:words' }]);
 			const markup = { inline_keyboard: buttons };
@@ -6623,41 +7336,12 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					const display = isExact ? w.slice(1, -1) : w;
 					return `${i + 1}. <code>${escapeHtml(display)}</code> [${label}匹配]`;
 				}).join('\n');
-			const punishText = config.punishType === 'ban' ? '封禁+拉黑' : '仅踢出';
-			const durationText = config.banDuration > 0 ? `临时${Math.round(config.banDuration / 60)}分钟` : '永久';
 			const msg = '🚫 <b>违禁词管理</b>\n\n' +
-				'<b>当前配置:</b>\n' +
-				'状态: ' + (config.enabled ? '✅ 启用' : '❌ 关闭') + '\n' +
-				'警告上限: <b>' + (config.warningLimit || WORD_WARNING_LIMIT) + '</b> 次\n' +
-				'处罚方式: <b>' + punishText + '</b>\n' +
-				'处罚时长: <b>' + durationText + '</b>\n\n' +
 				'<b>违禁词列表:</b>\n' + wordList + '\n\n' +
-				'添加: /addwords 词1,词2\n删除: /delwords 词';
+				'💡 点击下方按钮可设置单个违禁词规则\n' +
+				'添加: /addwords 词1,词2  删除: /delwords 词';
 			const buttons = [];
-			if (config.enabled) {
-				buttons.push([{ text: '🔴 关闭违禁词', callback_data: 'pnl:bwcfg:off' }]);
-			} else {
-				buttons.push([{ text: '🟢 启用违禁词', callback_data: 'pnl:bwcfg:on' }]);
-			}
-			const wl = config.warningLimit || WORD_WARNING_LIMIT;
-			buttons.push([
-				{ text: (wl === 1 ? '🔘' : '⚪') + ' 1次', callback_data: 'pnl:bwcfg:warn:1' },
-				{ text: (wl === 2 ? '🔘' : '⚪') + ' 2次', callback_data: 'pnl:bwcfg:warn:2' },
-				{ text: (wl === 3 ? '🔘' : '⚪') + ' 3次', callback_data: 'pnl:bwcfg:warn:3' },
-				{ text: (wl === 5 ? '🔘' : '⚪') + ' 5次', callback_data: 'pnl:bwcfg:warn:5' },
-				{ text: (wl === 10 ? '🔘' : '⚪') + ' 10次', callback_data: 'pnl:bwcfg:warn:10' }
-			]);
-			buttons.push([
-				{ text: (config.punishType === 'kick' ? '🔘' : '⚪') + ' 仅踢出', callback_data: 'pnl:bwcfg:type:kick' },
-				{ text: (config.punishType === 'ban' ? '🔘' : '⚪') + ' 封禁+拉黑', callback_data: 'pnl:bwcfg:type:ban' }
-			]);
-			buttons.push([
-				{ text: (config.banDuration === 0 ? '🔘' : '⚪') + ' 永久', callback_data: 'pnl:bwcfg:dur:0' },
-				{ text: (config.banDuration === 300 ? '🔘' : '⚪') + ' 5分钟', callback_data: 'pnl:bwcfg:dur:300' },
-				{ text: (config.banDuration === 1800 ? '🔘' : '⚪') + ' 30分钟', callback_data: 'pnl:bwcfg:dur:1800' },
-				{ text: (config.banDuration === 86400 ? '🔘' : '⚪') + ' 1天', callback_data: 'pnl:bwcfg:dur:86400' }
-			]);
-			buttons.push(backButton);
+			// 每个违禁词一个设置按钮
 			const markup = { inline_keyboard: buttons };
 			if (message) await editMessageText(chatId, message.message_id, msg, markup);
 			else await sendTelegramMessage(chatId, msg, markup);
