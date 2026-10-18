@@ -5210,7 +5210,11 @@ function extractAiResponseText(result) {
 		const first = result.choices[0];
 		if (first) {
 			if (typeof first.text === 'string') return first.text;
-			if (first.message && typeof first.message.content === 'string') return first.message.content;
+			if (first.message) {
+			if (typeof first.message.content === 'string' && first.message.content) return first.message.content;
+			if (typeof first.message.reasoning === 'string' && first.message.reasoning) return first.message.reasoning;
+			if (typeof first.message.reasoning_content === 'string' && first.message.reasoning_content) return first.message.reasoning_content;
+		}
 		}
 	}
 	return '';
