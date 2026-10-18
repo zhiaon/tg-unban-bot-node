@@ -247,6 +247,8 @@ async function checkAndGenerateSummary(env, config) {
 
 // 吵架检测跟踪器 (内存, 每群独立, 只跟踪回复链)
 const argumentTracker = new Map(); // key: chatId → [{fromId, toId, time, hostility}]
+// 独立骂人跟踪器 (5分钟内同一用户3+条敌意消息)
+const independentHostilityTracker = new Map(); // key: `${chatId}_${userId}` → [{time, hostility}]
 
 // 检查是否构成吵架 (5分钟内, 回复链中 3+ 条敌意消息 × 2+ 人互怼)
 // 只统计有明确回复目标的敌意消息, 避免误判正常聊天
@@ -282,6 +284,26 @@ async function checkArgument(chatId, fromId, toId, hostility) {
 	// 确认是吵架: 清空记录, 返回参与者
 	argumentTracker.set(key, []);
 	return { users: [...userIds], messages: hostile };
+}
+
+// 独立骂人检测 (5分钟内同一用户3+条敌意消息，不要求回复)
+async function checkIndependentHostility(chatId, userId, hostility) {
+	if (hostility < 2) return null;
+	const key = `${chatId}_${userId}`;
+	const now = Date.now();
+	if (!independentHostilityTracker.has(key)) independentHostilityTracker.set(key, []);
+	const entries = independentHostilityTracker.get(key);
+	entries.push({ time: now, hostility });
+	// 清理5分钟前的记录
+	const cutoff = now - 5 * 60 * 1000;
+	const recent = entries.filter(e => e.time > cutoff);
+	independentHostilityTracker.set(key, recent);
+	if (recent.length >= 3) {
+		// 清空记录，避免重复触发
+		independentHostilityTracker.set(key, []);
+		return { userId: String(userId), count: recent.length };
+	}
+	return null;
 }
 
 // 自动介入
@@ -360,6 +382,24 @@ async function aiProcessMessage(message, env) {
 				const userLabel = message.from.username ? `@${message.from.username}` : `${message.from.first_name} (${message.from.id})`;
 				console.log(`[AI情绪] 攻击性消息 L${hostilityLevel}: ${userLabel}: ${text.slice(0, 80)}`);
 
+				// (0) 独立骂人检测 (3+条敌意消息，不要求回复)
+				if (!message.reply_to_message) {
+					const indResult = await checkIndependentHostility(message.chat.id, message.from.id, hostilityLevel);
+					if (indResult) {
+						// 通知所有管理员并@他们 + 禁言10分钟
+						try {
+							const adminSet = await getMainGroupAdminSet(String(message.chat.id));
+							const adminMentions = adminSet ? [...adminSet].map(id => `<a href="tg://user?id=${id}">@${id}</a>`).join(' ') : '';
+							// 在群里发送通知，@所有管理员
+							const notifyText = `🔥 <b>AI警告: 独立骂人</b>\n\n用户: ${userLabel}\n5分钟内发送 ${indResult.count} 条攻击性消息\n已禁言10分钟\n\n${adminMentions} 请处理!`;
+							await sendTelegramMessage(String(message.chat.id), notifyText, null, false);
+							// 禁言10分钟
+							await muteUserInChat(message.chat.id, message.from.id, 10 * 60);
+							console.log(`[AI情绪] 已禁言: ${message.chat.id}, user=${indResult.userId}`);
+						} catch (e) { console.error('[AI情绪] 通知管理员失败:', e.message); }
+					}
+				}
+
 				// (1) 通知管理员 (私聊发送警报 + 消息链接)
 				try {
 					const adminSet = await getMainGroupAdminSet(String(message.chat.id));
@@ -381,8 +421,18 @@ async function aiProcessMessage(message, env) {
 					if (targetId) {
 						const argResult = await checkArgument(message.chat.id, message.from.id, targetId, hostilityLevel);
 						if (argResult) {
-							// (3) 自动介入 (传入选中的用户列表)
-							await autoIntervene(message.chat.id, env, hostilityLevel, argResult.users);
+							// 通知管理员 + 禁言10分钟
+							try {
+								const adminSet = await getMainGroupAdminSet(String(message.chat.id));
+								const adminMentions = adminSet ? [...adminSet].map(id => `<a href="tg://user?id=${id}">@${id}</a>`).join(' ') : '';
+								const notifyText = `🔥 <b>AI警告: 互怼骂人</b>\n\n参与用户: ${argResult.users.map(id => `<a href="tg://user?id=${id}">@${id}</a>`).join(' ')}\n5分钟内 ${argResult.messages.length} 条敌意消息\n已禁言10分钟\n\n${adminMentions} 请处理!`;
+								await sendTelegramMessage(String(message.chat.id), notifyText, null, false);
+								// 禁言所有参与者10分钟
+								for (const userId of argResult.users) {
+									await muteUserInChat(message.chat.id, userId, 10 * 60);
+								}
+								console.log(`[AI情绪] 已禁言: ${message.chat.id}, users=${argResult.users.join(',')}`);
+							} catch (e) { console.error('[AI情绪] 通知管理员失败:', e.message); }
 						}
 					}
 				}
