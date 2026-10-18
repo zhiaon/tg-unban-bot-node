@@ -144,7 +144,7 @@ async function aiAnalyzeMessage(text, env) {
 	try {
 		const result = await env.AI.run('ai', {
 			messages: [
-				{ role: 'system', content: '你是一个群消息分析器。分析以下消息：1.是否广告/推广/诈骗/引流 2.攻击性等级0-3(0=正常,1=语气不佳,2=辱骂攻击,3=严重威胁极端侮辱)。只返回JSON：{"is_ad":false,"hostility":0,"reason":"简短说明"}' },
+				{ role: 'system', content: '你是一个群消息分析器。分析以下消息：1.是否广告/推广/诈骗/引流 2.攻击性等级0-3：0=正常，1=语气不佳，2=辱骂攻击（包含：滚/闭嘴/傻逼/垃圾/废物/狗东西/操你妈/日你妈/他妈的/你爹等攻击家人脏话），3=严重威胁极端侮辱。只返回JSON：{"is_ad":false,"hostility":0,"reason":"简短说明"}' },
 				{ role: 'user', content: text.slice(0, 500) }
 			]
 		});
