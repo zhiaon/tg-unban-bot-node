@@ -121,6 +121,35 @@ async function saveAiConfig(env, config) {
 	if (env.KV) { await env.KV.put(AI_CONFIG_KEY, json); }
 }
 
+const HOSTILITY_WARNINGS_KEY = 'hostility_warnings_v1';
+
+async function getHostilityWarnings(env, userId) {
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(HOSTILITY_WARNINGS_KEY).first();
+		if (row) {
+			try {
+				const all = JSON.parse(row.value);
+				return all[String(userId)] || 0;
+			} catch { return 0; }
+		}
+	}
+	return 0;
+}
+
+async function setHostilityWarnings(env, userId, count) {
+	let all = {};
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(HOSTILITY_WARNINGS_KEY).first();
+		if (row) { try { all = JSON.parse(row.value); } catch {} }
+	}
+	all[String(userId)] = count;
+	const json = JSON.stringify(all);
+	if (isDbReady(env)) {
+		await env.DB.prepare('INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(HOSTILITY_WARNINGS_KEY, json).run();
+	}
+	if (env.KV) { await env.KV.put(HOSTILITY_WARNINGS_KEY, json); }
+}
+
 async function getFaqs(env) {
 	if (isDbReady(env)) {
 		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(FAQ_KEY).first();
@@ -379,62 +408,62 @@ async function aiProcessMessage(message, env) {
 			// 情绪监控 (hostility 0-3)
 			if (config.sentimentMonitor && result.hostility && result.hostility >= 2) {
 				const hostilityLevel = result.hostility;
-				const userLabel = message.from.username ? `@${message.from.username}` : `${message.from.first_name} (${message.from.id})`;
-				console.log(`[AI情绪] 攻击性消息 L${hostilityLevel}: ${userLabel}: ${text.slice(0, 80)}`);
+				const userMention = message.from.username ? `@${message.from.username}` : `<a href="tg://user?id=${message.from.id}">${message.from.first_name}</a>`;
+				console.log(`[AI情绪] 攻击性消息 L${hostilityLevel}: ${message.from.id}: ${text.slice(0, 80)}`);
 
-				// (0) 独立骂人检测 (3+条敌意消息，不要求回复)
-				if (!message.reply_to_message) {
-					const indResult = await checkIndependentHostility(message.chat.id, message.from.id, hostilityLevel);
-					if (indResult) {
-						// 通知所有管理员并@他们 + 禁言10分钟
-						try {
-							const adminSet = await getMainGroupAdminSet(String(message.chat.id));
-							const adminMentions = adminSet ? [...adminSet].map(id => `<a href="tg://user?id=${id}">@${id}</a>`).join(' ') : '';
-							// 在群里发送通知，@所有管理员
-							const notifyText = `🔥 <b>AI警告: 独立骂人</b>\n\n用户: ${userLabel}\n5分钟内发送 ${indResult.count} 条攻击性消息\n已禁言10分钟\n\n${adminMentions} 请处理!`;
-							await sendTelegramMessage(String(message.chat.id), notifyText, null, false);
-							// 禁言10分钟
-							await muteUserInChat(message.chat.id, message.from.id, 10 * 60);
-							console.log(`[AI情绪] 已禁言: ${message.chat.id}, user=${indResult.userId}`);
-						} catch (e) { console.error('[AI情绪] 通知管理员失败:', e.message); }
-					}
-				}
+				// 累计警告计数
+				const currentWarns = await getHostilityWarnings(env, message.from.id);
+				const newWarns = currentWarns + 1;
+				await setHostilityWarnings(env, message.from.id, newWarns);
 
-				// (1) 通知管理员 (私聊发送警报 + 消息链接)
-				try {
-					const adminSet = await getMainGroupAdminSet(String(message.chat.id));
-					if (adminSet && adminSet.size > 0) {
-						const chatIdRaw = String(message.chat.id).replace('-100', '');
-						const msgLink = `https://t.me/c/${chatIdRaw}/${message.message_id}`;
-						const levelText = hostilityLevel >= 3 ? '🔴 严重' : '🟡 中等';
-						const notifyText = `🚨 <b>AI情绪监控警报</b> ${levelText}\n\n用户: ${userLabel}\n等级: ${hostilityLevel}/3\nAI分析: ${result.reason}\n消息: ${escapeHtml((text).slice(0, 200))}\n<a href="${msgLink}">查看消息</a>`;
-						for (const adminId of adminSet) {
-							if (String(adminId) === String(message.from.id)) continue;
-							try { await sendTelegramMessage(String(adminId), notifyText, null, false); } catch (e) {}
+				if (newWarns >= 4) {
+					// 超过3次警告 → 踢出 + 封禁 + 拉黑
+					try {
+						await banUserPermanently(message.chat.id, message.from.id);
+						await markUserGroupStatus(env, message.from.id, '封禁', message.chat.id);
+						await addToBlacklist(message.from.id, env, 'ban', BOT_ID);
+					} catch (e) { console.error('[AI情绪] 封禁失败:', e.message); }
+					await sendTelegramMessage(message.chat.id,
+						`🚫 <b>AI情绪监控 - 已封禁</b>\n\n${userMention} 累计 ${newWarns} 次攻击性消息，已封禁踢出并加入黑名单。\nAI原因: ${result.reason}`,
+						null, false);
+					console.log(`[AI情绪] 已封禁: user=${message.from.id}, warns=${newWarns}`);
+
+				} else if (newWarns === 3) {
+					// 第3次 → 私聊通知管理员 + 群里@所有管理员 + 禁言5分钟
+					try {
+						await muteUserInChat(message.chat.id, message.from.id, 5 * 60);
+					} catch (e) { console.error('[AI情绪] 禁言失败:', e.message); }
+
+					// 群里@所有管理员
+					try {
+						const adminSet = await getMainGroupAdminSet(String(message.chat.id));
+						const adminMentions = adminSet ? [...adminSet].map(id => `<a href="tg://user?id=${id}">@${id}</a>`).join(' ') : '';
+						await sendTelegramMessage(message.chat.id,
+							`🔇 <b>AI警告 3/3 - 已禁言</b>\n\n${userMention} 第3次发布攻击性消息，已禁言5分钟。\nAI原因: ${result.reason}\n再犯将被封禁踢出！\n\n${adminMentions} 请注意!`,
+							null, false);
+					} catch (e) { console.error('[AI情绪] 群通知失败:', e.message); }
+
+					// 私聊通知所有管理员
+					try {
+						const adminSet = await getMainGroupAdminSet(String(message.chat.id));
+						if (adminSet && adminSet.size > 0) {
+							const chatIdRaw = String(message.chat.id).replace('-100', '');
+							const msgLink = `https://t.me/c/${chatIdRaw}/${message.message_id}`;
+							const notifyText = `🚨 <b>AI情绪监控 - 第3次警告</b>\n\n用户: ${userMention}\n等级: ${hostilityLevel}/3\nAI分析: ${result.reason}\n消息: ${escapeHtml((text).slice(0, 200))}\n<a href="${msgLink}">查看消息</a>`;
+							for (const adminId of adminSet) {
+								if (String(adminId) === String(message.from.id)) continue;
+								try { await sendTelegramMessage(String(adminId), notifyText, null, false); } catch (e) {}
+							}
 						}
-					}
-				} catch (e) { console.error('[AI情绪] 通知管理员失败:', e.message); }
+					} catch (e) { console.error('[AI情绪] 私聊通知失败:', e.message); }
+					console.log(`[AI情绪] 第3次警告+禁言: user=${message.from.id}`);
 
-				// (2) 连续对话检测 (仅回复链中的互怼才算吵架, 正常聊天不会误判)
-				if (message.reply_to_message) {
-					const targetId = message.reply_to_message.from?.id;
-					if (targetId) {
-						const argResult = await checkArgument(message.chat.id, message.from.id, targetId, hostilityLevel);
-						if (argResult) {
-							// 通知管理员 + 禁言10分钟
-							try {
-								const adminSet = await getMainGroupAdminSet(String(message.chat.id));
-								const adminMentions = adminSet ? [...adminSet].map(id => `<a href="tg://user?id=${id}">@${id}</a>`).join(' ') : '';
-								const notifyText = `🔥 <b>AI警告: 互怼骂人</b>\n\n参与用户: ${argResult.users.map(id => `<a href="tg://user?id=${id}">@${id}</a>`).join(' ')}\n5分钟内 ${argResult.messages.length} 条敌意消息\n已禁言10分钟\n\n${adminMentions} 请处理!`;
-								await sendTelegramMessage(String(message.chat.id), notifyText, null, false);
-								// 禁言所有参与者10分钟
-								for (const userId of argResult.users) {
-									await muteUserInChat(message.chat.id, userId, 10 * 60);
-								}
-								console.log(`[AI情绪] 已禁言: ${message.chat.id}, users=${argResult.users.join(',')}`);
-							} catch (e) { console.error('[AI情绪] 通知管理员失败:', e.message); }
-						}
-					}
+				} else {
+					// 第1-2次 → 群里@用户警告
+					await sendTelegramMessage(message.chat.id,
+						`⚠️ <b>AI情绪警告 ${newWarns}/3</b>\n\n${userMention} 请注意言行！\nAI原因: ${result.reason}\n累计3次将被禁言，超过3次将被封禁。`,
+						null, false);
+					console.log(`[AI情绪] 警告 ${newWarns}/3: user=${message.from.id}`);
 				}
 			}
 		}
