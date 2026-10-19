@@ -244,7 +244,7 @@ async function checkAndGenerateSummary(env, config) {
 	if (!config.dailySummary || !config.summaryHour) return;
 	try {
 		const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
-		const today = now.toISOString().slice(0, 10);
+		const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
 
 		if (isDbReady(env)) {
 			const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(AI_LAST_SUMMARY_KEY).first();
@@ -2071,6 +2071,15 @@ async function restoreUserInAllMainGroups(userId, env) {
 		broadcastPerGroup
 	};
 }
+
+// 启动摘要定时器 (每分钟检查一次)
+setInterval(async () => {
+	try {
+		const env = getEnv();
+		const config = await loadAiConfig(env);
+		if (config.dailySummary) { await checkAndGenerateSummary(env, config); }
+	} catch (e) { /* ignore */ }
+}, 60000);
 
 export default {
 	async fetch(request, env, ctx) {
