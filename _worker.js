@@ -7333,9 +7333,9 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 		const head = prompts[field];
 		if (!head) { try { await answerCallbackQuery(callbackQuery.id); } catch (_) {} return true; }
 		const tips = {
-			key: '例：sk-XNX5Ajd2lKNbF2SEAyOCdWzA8B9M6c8V',
-			url: '例：https://token.sensenova.cn/v1',
-			model: '例：sensenova-6.8-flash-lite'
+			key: '例：sk-xxxxxxxxxxxxxxxxxxxx',
+			url: '例：https://api.example.com/v1',
+			model: '例：gpt-4o-mini'
 		};
 		try { await answerCallbackQuery(callbackQuery.id, '请回复机器人发来的消息'); } catch (_) {}
 		await sendTelegramMessage(

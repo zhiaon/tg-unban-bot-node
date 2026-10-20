@@ -125,8 +125,8 @@ const AI_TIMEOUT_MS = parseInt(process.env.AD_AI_TIMEOUT_MS || '12000');
 
 const AI_DEFAULT_CFG = {
   apiKey: process.env.DEEPSEEK_API_KEY || '',
-  baseUrl: process.env.DEEPSEEK_BASE_URL || 'https://token.sensenova.cn/v1',
-  model: process.env.DEEPSEEK_MODEL || 'sensenova-6.8-flash-lite'
+  baseUrl: process.env.DEEPSEEK_BASE_URL || '',
+  model: process.env.DEEPSEEK_MODEL || ''
 };
 
 let _aiCfgCache = null;
@@ -172,10 +172,11 @@ function saveAiEndpointConfig(patch) {
 // 每次 buildEnv 时重建 AI 对象 → 配置改动后下一条消息即使用新 Key
 function makeAIShim() {
   const cfg = getAiEndpointConfig();
-  if (!cfg.apiKey) return null;
+  if (!cfg.apiKey || !cfg.baseUrl) return null;
   return {
     async run(model, options) {
       const live = getAiEndpointConfig();
+      if (!live.apiKey || !live.baseUrl) throw new Error('AI 未配置：请先在管理面板填写 API Key 和地址');
       let messages;
       if (options.messages) {
         messages = options.messages;
@@ -223,10 +224,10 @@ function makeAIShim() {
 }
 
 const _bootCfg = getAiEndpointConfig();
-if (_bootCfg.apiKey) {
+if (_bootCfg.apiKey && _bootCfg.baseUrl) {
   console.log('[AI] AI shim 已启用, model=' + _bootCfg.model + ', baseUrl=' + _bootCfg.baseUrl);
 } else {
-  console.log('[AI] 未配置 API Key, /ad 举报 AI 评级将回退 C 级 (5 票)');
+  console.log('[AI] 未配置 API Key/地址, 请用 /panel → AI 智能功能 → 配置 API 设置');
 }
 
 // ─── env 对象 ──────────────────────────────────────────
