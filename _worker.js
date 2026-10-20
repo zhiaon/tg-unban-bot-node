@@ -3528,11 +3528,7 @@ Environment=DEEPSEEK_API_KEY=${newKey}`;
 			fs.writeFileSync(overridePath, content);
 			
 			const maskedKey = newKey.slice(0, 8) + '****' + newKey.slice(-4);
-			await sendTelegramMessage(chatId, `✅ <b>API Key 已更新</b>
-
-新 Key: <code>${maskedKey}</code>
-
-⚠️ 请运行 <code>/restartai</code> 或点击面板按钮重启服务生效`, null, null, true);
+			await sendTelegramMessage(chatId, `✅ <b>API Key 已更新</b>\n\n新 Key: <code>${maskedKey}</code>\n\n⚠️ 请运行 <code>/restartai</code> 或点击面板按钮重启服务生效`, null, null, true);
 			console.log(`[AI] 管理员 ${userId} 更新了 API Key`);
 		} catch (e) {
 			await sendTelegramMessage(chatId, `❌ 更新失败: ${e.message}`, null, null, true);
@@ -3569,11 +3565,7 @@ Environment=DEEPSEEK_BASE_URL=${newUrl}`;
 			
 			fs.writeFileSync(overridePath, content);
 			
-			await sendTelegramMessage(chatId, `✅ <b>API 地址已更新</b>
-
-新地址: <code>${newUrl}</code>
-
-⚠️ 请运行 <code>/restartai</code> 或点击面板按钮重启服务生效`, null, null, true);
+			await sendTelegramMessage(chatId, `✅ <b>API 地址已更新</b>\n\n新地址: <code>${newUrl}</code>\n\n⚠️ 请运行 <code>/restartai</code> 或点击面板按钮重启服务生效`, null, null, true);
 			console.log(`[AI] 管理员 ${userId} 更新了 API 地址`);
 		} catch (e) {
 			await sendTelegramMessage(chatId, `❌ 更新失败: ${e.message}`, null, null, true);
@@ -3593,14 +3585,10 @@ Environment=DEEPSEEK_BASE_URL=${newUrl}`;
 		try {
 			const { execSync } = require('child_process');
 			execSync('sudo systemctl restart tg-unban-bot', { timeout: 10000 });
-			await sendTelegramMessage(chatId, '✅ <b>服务已重启</b>
-
-新的 API 配置已生效！', null, null, true);
+			await sendTelegramMessage(chatId, '✅ <b>服务已重启</b>\n\n新的 API 配置已生效！', null, null, true);
 			console.log(`[AI] 管理员 ${userId} 重启了服务`);
 		} catch (e) {
-			await sendTelegramMessage(chatId, `❌ <b>重启失败</b>
-
-错误: ${e.message}`, null, null, true);
+			await sendTelegramMessage(chatId, `❌ <b>重启失败</b>\n\n错误: ${e.message}`, null, null, true);
 			console.error('[AI] 重启服务失败:', e.message);
 		}
 		return;
