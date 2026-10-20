@@ -2245,6 +2245,9 @@ async function handleInitialization(request) {
 			{ command: "delfaq", description: "删除FAQ问答 (管理员)" },
 			{ command: "listfaq", description: "查看FAQ列表 (管理员)" },
 			{ command: "summary", description: "手动生成今日摘要 (管理员)" },
+			{ command: "setapikey", description: "修改 AI API Key (管理员)" },
+			{ command: "setapiurl", description: "修改 AI API 地址 (管理员)" },
+			{ command: "restartai", description: "重启服务生效 (管理员)" },
 				{ command: "delwords", description: "删除违禁词 (管理员)" },
 				{ command: "listwords", description: "查看所有违禁词 (管理员)" },
 				{ command: "clearwarn", description: "清除违禁词警告 (管理员)" },
@@ -3492,6 +3495,113 @@ async function handleMessage(message, env) {
 		} catch (e) {
 			console.error('[AI] 手动摘要生成失败:', e.message);
 			await sendTelegramMessage(chatId, `❌ 摘要生成失败: ${e.message}`, null, null, true);
+		}
+		return;
+	}
+
+	// 管理员: /setapikey <key> — 修改 AI API Key
+	const setApiKeyCmd = parseCommand(text, 'setapikey');
+	if (setApiKeyCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		
+		const newKey = setApiKeyCmd.args.trim();
+		if (!newKey || newKey.length < 10) {
+			await sendTelegramMessage(chatId, '❌ 使用方法: <code>/setapikey 你的新APIKey</code>', null, null, true);
+			return;
+		}
+		
+		try {
+			// 更新 systemd override 文件
+			const fs = require('fs');
+			const overridePath = '/etc/systemd/system/tg-unban-bot.service.d/ai-override.conf';
+			let content = fs.readFileSync(overridePath, 'utf8');
+			
+			// 替换或添加 DEEPSEEK_API_KEY
+			if (content.includes('DEEPSEEK_API_KEY=')) {
+				content = content.replace(/DEEPSEEK_API_KEY=.*/g, `DEEPSEEK_API_KEY=${newKey}`);
+			} else {
+				content += `
+Environment=DEEPSEEK_API_KEY=${newKey}`;
+			}
+			
+			fs.writeFileSync(overridePath, content);
+			
+			const maskedKey = newKey.slice(0, 8) + '****' + newKey.slice(-4);
+			await sendTelegramMessage(chatId, `✅ <b>API Key 已更新</b>
+
+新 Key: <code>${maskedKey}</code>
+
+⚠️ 请运行 <code>/restartai</code> 或点击面板按钮重启服务生效`, null, null, true);
+			console.log(`[AI] 管理员 ${userId} 更新了 API Key`);
+		} catch (e) {
+			await sendTelegramMessage(chatId, `❌ 更新失败: ${e.message}`, null, null, true);
+			console.error('[AI] 更新 API Key 失败:', e.message);
+		}
+		return;
+	}
+
+	// 管理员: /setapiurl <url> — 修改 AI API 地址
+	const setApiUrlCmd = parseCommand(text, 'setapiurl');
+	if (setApiUrlCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		
+		const newUrl = setApiUrlCmd.args.trim();
+		if (!newUrl || !newUrl.startsWith('http')) {
+			await sendTelegramMessage(chatId, '❌ 使用方法: <code>/setapiurl https://your-api-url/v1</code>', null, null, true);
+			return;
+		}
+		
+		try {
+			// 更新 systemd override 文件
+			const fs = require('fs');
+			const overridePath = '/etc/systemd/system/tg-unban-bot.service.d/ai-override.conf';
+			let content = fs.readFileSync(overridePath, 'utf8');
+			
+			// 替换或添加 DEEPSEEK_BASE_URL
+			if (content.includes('DEEPSEEK_BASE_URL=')) {
+				content = content.replace(/DEEPSEEK_BASE_URL=.*/g, `DEEPSEEK_BASE_URL=${newUrl}`);
+			} else {
+				content += `
+Environment=DEEPSEEK_BASE_URL=${newUrl}`;
+			}
+			
+			fs.writeFileSync(overridePath, content);
+			
+			await sendTelegramMessage(chatId, `✅ <b>API 地址已更新</b>
+
+新地址: <code>${newUrl}</code>
+
+⚠️ 请运行 <code>/restartai</code> 或点击面板按钮重启服务生效`, null, null, true);
+			console.log(`[AI] 管理员 ${userId} 更新了 API 地址`);
+		} catch (e) {
+			await sendTelegramMessage(chatId, `❌ 更新失败: ${e.message}`, null, null, true);
+			console.error('[AI] 更新 API 地址失败:', e.message);
+		}
+		return;
+	}
+
+	// 管理员: /restartai — 重启服务
+	const restartAiCmd = parseCommand(text, 'restartai');
+	if (restartAiCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		
+		await sendTelegramMessage(chatId, '⏳ 正在重启服务...', null, null, true);
+		
+		try {
+			const { execSync } = require('child_process');
+			execSync('sudo systemctl restart tg-unban-bot', { timeout: 10000 });
+			await sendTelegramMessage(chatId, '✅ <b>服务已重启</b>
+
+新的 API 配置已生效！', null, null, true);
+			console.log(`[AI] 管理员 ${userId} 重启了服务`);
+		} catch (e) {
+			await sendTelegramMessage(chatId, `❌ <b>重启失败</b>
+
+错误: ${e.message}`, null, null, true);
+			console.error('[AI] 重启服务失败:', e.message);
 		}
 		return;
 	}
@@ -7097,6 +7207,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
 			],
 			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			[{ text: '🔑 配置 API', callback_data: 'pnl:aiconfig' }],
 			backButton
 		];
 		const markup = { inline_keyboard: buttons };
@@ -7138,6 +7249,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
 			],
 			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			[{ text: '🔑 配置 API', callback_data: 'pnl:aiconfig' }],
 			backButton
 		];
 		const markup = { inline_keyboard: buttons };
@@ -7179,6 +7291,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
 			],
 			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			[{ text: '🔑 配置 API', callback_data: 'pnl:aiconfig' }],
 			backButton
 		];
 		const markup = { inline_keyboard: buttons };
