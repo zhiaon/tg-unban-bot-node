@@ -3473,6 +3473,9 @@ async function handleMessage(message, env) {
 		
 		console.log(`[AI] 管理员 ${userId} 手动触发摘要生成`);
 		
+		// 加载 AI 配置
+		const config = await loadAiConfig(env);
+		
 		// 重置今日摘要记录，强制生成
 		try {
 			if (isDbReady(env)) {
