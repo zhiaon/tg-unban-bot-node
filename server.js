@@ -2,22 +2,16 @@
  * TG Unban Bot — Node.js 适配层
  * 在普通服务器上运行 Cloudflare Workers 代码 (_worker.js)
  *
- * ============================================================
- * 本项目基于 cmliu/CF-Workers-TGUnbanBot 改造
- * 原作者: cmliu (https://github.com/cmliu)
- * 原项目: https://github.com/cmliu/CF-Workers-TGUnbanBot
- *
  * 适配三类 Workers 绑定:
  *  - KV  → SQLite key-value 表 (支持 TTL)
  *  - DB  → SQLite D1 兼容 shim (prepare/bind/first/all/run/exec/batch)
  *  - AI  → DeepSeek API (可选; 未配置时 env.AI=null, /ad 回退 C 级)
- * ============================================================
  */
 
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -125,17 +119,63 @@ const DB = {
   }
 };
 
-// ─── AI Shim (可选, DeepSeek API) ──────────────────────
-let AI = null;
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
-const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1';
-const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+// ─── AI Shim (可选, DeepSeek API; 支持运行时改配置) ─────
+const AI_CONFIG_FILE = join(__dirname, 'data', 'ai-config.json');
 const AI_TIMEOUT_MS = parseInt(process.env.AD_AI_TIMEOUT_MS || '12000');
 
-if (DEEPSEEK_API_KEY) {
-  AI = {
+const AI_DEFAULT_CFG = {
+  apiKey: process.env.DEEPSEEK_API_KEY || '',
+  baseUrl: process.env.DEEPSEEK_BASE_URL || 'https://token.sensenova.cn/v1',
+  model: process.env.DEEPSEEK_MODEL || 'sensenova-6.8-flash-lite'
+};
+
+let _aiCfgCache = null;
+let _aiCfgCacheAt = 0;
+
+// 读取当前 AI 接入配置（文件优先，2 秒缓存；改完立即生效）
+function getAiEndpointConfig() {
+  const now = Date.now();
+  if (_aiCfgCache && now - _aiCfgCacheAt < 2000) return _aiCfgCache;
+  const cfg = { ...AI_DEFAULT_CFG };
+  try {
+    if (existsSync(AI_CONFIG_FILE)) {
+      const raw = JSON.parse(readFileSync(AI_CONFIG_FILE, 'utf8')) || {};
+      if (typeof raw.apiKey === 'string') cfg.apiKey = raw.apiKey;
+      if (typeof raw.baseUrl === 'string' && raw.baseUrl) cfg.baseUrl = raw.baseUrl;
+      if (typeof raw.model === 'string' && raw.model) cfg.model = raw.model;
+    }
+  } catch (e) {
+    console.error('[AI] 读取 ai-config.json 失败:', e.message);
+  }
+  _aiCfgCache = cfg;
+  _aiCfgCacheAt = now;
+  return cfg;
+}
+
+// 保存部分配置字段（apiKey / baseUrl / model），立即生效，无需重启
+function saveAiEndpointConfig(patch) {
+  const cur = getAiEndpointConfig();
+  const cfg = { apiKey: cur.apiKey, baseUrl: cur.baseUrl, model: cur.model, ...(patch || {}) };
+  try {
+    writeFileSync(AI_CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  } catch (e) {
+    console.error('[AI] 写入 ai-config.json 失败:', e.message);
+    throw e;
+  }
+  _aiCfgCache = cfg;
+  _aiCfgCacheAt = Date.now();
+  console.log('[AI] 配置已更新: model=' + cfg.model + ', baseUrl=' + cfg.baseUrl +
+    ', key=' + (cfg.apiKey ? cfg.apiKey.slice(0, 8) + '...' : '(空)'));
+  return cfg;
+}
+
+// 每次 buildEnv 时重建 AI 对象 → 配置改动后下一条消息即使用新 Key
+function makeAIShim() {
+  const cfg = getAiEndpointConfig();
+  if (!cfg.apiKey) return null;
+  return {
     async run(model, options) {
-      // Workers AI 的两种调用格式统一转换为 chat messages
+      const live = getAiEndpointConfig();
       let messages;
       if (options.messages) {
         messages = options.messages;
@@ -153,14 +193,14 @@ if (DEEPSEEK_API_KEY) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
       try {
-        const resp = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+        const resp = await fetch(`${String(live.baseUrl).replace(/\/+$/, '')}/chat/completions`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+            'Authorization': `Bearer ${live.apiKey}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            model: DEEPSEEK_MODEL,
+            model: live.model,
             messages,
             max_tokens: 1000,
             temperature: 0.3,
@@ -171,20 +211,22 @@ if (DEEPSEEK_API_KEY) {
         clearTimeout(timer);
         if (!resp.ok) {
           const text = await resp.text().catch(() => '');
-          throw new Error(`DeepSeek API ${resp.status}: ${text.slice(0, 200)}`);
+          throw new Error(`AI API ${resp.status}: ${text.slice(0, 200)}`);
         }
-        const data = await resp.json();
-        // 返回 OpenAI 兼容格式, extractAiResponseText 可直接解析
-        return data;
+        return await resp.json();
       } catch (err) {
         clearTimeout(timer);
         throw err;
       }
     }
   };
-  console.log('[AI] DeepSeek AI shim 已启用, model=' + DEEPSEEK_MODEL);
+}
+
+const _bootCfg = getAiEndpointConfig();
+if (_bootCfg.apiKey) {
+  console.log('[AI] AI shim 已启用, model=' + _bootCfg.model + ', baseUrl=' + _bootCfg.baseUrl);
 } else {
-  console.log('[AI] 未配置 DEEPSEEK_API_KEY, /ad 举报 AI 评级将回退 C 级 (5 票)');
+  console.log('[AI] 未配置 API Key, /ad 举报 AI 评级将回退 C 级 (5 票)');
 }
 
 // ─── env 对象 ──────────────────────────────────────────
@@ -199,7 +241,9 @@ function buildEnv() {
     AD_AI_TIMEOUT_MS: process.env.AD_AI_TIMEOUT_MS,
     KV,
     DB,
-    AI
+    AI: makeAIShim(),
+    GET_AI_ENDPOINT: getAiEndpointConfig,
+    SAVE_AI_ENDPOINT: saveAiEndpointConfig
   };
 }
 

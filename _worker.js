@@ -2949,6 +2949,38 @@ async function handleMessage(message, env) {
 	const userId = message.from.id;
 	const text = message.text;
 	const username = message.from.username || message.from.first_name || '用户';
+	// AI 配置输入（回复机器人 ForceReply 提示）—— 保存后立即生效，无需重启
+	if (message.reply_to_message && message.text && message.reply_to_message.from && message.reply_to_message.from.is_bot) {
+		const rtText = message.reply_to_message.text || '';
+		const field = rtText.startsWith('🔑 请输入新的 API Key') ? 'key'
+			: rtText.startsWith('🌐 请输入新的 API 地址') ? 'url'
+			: rtText.startsWith('🤖 请输入新的模型名称') ? 'model' : null;
+		if (field) {
+			if (!(await checkCommandAdmin(userId, message))) {
+				await sendTelegramMessage(chatId, '❌ 仅管理员可修改 AI 配置', null, message.message_id);
+				return;
+			}
+			const val = message.text.trim();
+			// 尝试删除含秘钥的原消息（群内防泄漏）
+			try { await deleteMessage(chatId, message.message_id); } catch (_) {}
+			try { await deleteMessage(chatId, message.reply_to_message.message_id); } catch (_) {}
+			try {
+				if (typeof env.SAVE_AI_ENDPOINT !== 'function') throw new Error('当前部署不支持在线修改');
+				const patch = field === 'key' ? { apiKey: val } : field === 'url' ? { baseUrl: val } : { model: val };
+				env.SAVE_AI_ENDPOINT(patch);
+				const label = field === 'key' ? 'API Key' : field === 'url' ? 'API 地址' : '模型';
+				const shown = field === 'key' && val.length > 12 ? val.slice(0, 8) + '****' + val.slice(-4) : val;
+				await sendTelegramMessage(chatId,
+					'✅ <b>' + label + ' 已更新</b>\n\n<code>' + escapeHtml(shown) + '</code>\n\n' +
+					'⚡ 立即生效，无需重启。发送 <code>/panel</code> → AI 智能功能 → 🔑 配置 API 查看',
+					null, null, true);
+			} catch (e) {
+				await sendTelegramMessage(chatId, '❌ 更新失败: ' + escapeHtml(e.message), null, null, true);
+			}
+			return;
+		}
+	}
+
 
 	// 联网黑名单自动查杀(消息路径):真人发送的每条消息(任意聊天,含任一主群与其他群/私聊)
 	// 都过一遍查杀;是否真正触发由函数内部守卫决定(群聊类型 + 绑定 D1 + bot 是群管理员)。
@@ -3512,23 +3544,14 @@ async function handleMessage(message, env) {
 		}
 		
 		try {
-			// 更新 systemd override 文件
-			const fs = require('fs');
-			const overridePath = '/etc/systemd/system/tg-unban-bot.service.d/ai-override.conf';
-			let content = fs.readFileSync(overridePath, 'utf8');
-			
-			// 替换或添加 DEEPSEEK_API_KEY
-			if (content.includes('DEEPSEEK_API_KEY=')) {
-				content = content.replace(/DEEPSEEK_API_KEY=.*/g, `DEEPSEEK_API_KEY=${newKey}`);
-			} else {
-				content += `
-Environment=DEEPSEEK_API_KEY=${newKey}`;
-			}
-			
-			fs.writeFileSync(overridePath, content);
-			
+			if (typeof env.SAVE_AI_ENDPOINT !== 'function') throw new Error('当前部署不支持在线修改');
+			env.SAVE_AI_ENDPOINT({ apiKey: newKey });
 			const maskedKey = newKey.slice(0, 8) + '****' + newKey.slice(-4);
-			await sendTelegramMessage(chatId, `✅ <b>API Key 已更新</b>\n\n新 Key: <code>${maskedKey}</code>\n\n⚠️ 请运行 <code>/restartai</code> 或点击面板按钮重启服务生效`, null, null, true);
+			await sendTelegramMessage(chatId, `✅ <b>API Key 已更新</b>
+
+新 Key: <code>${maskedKey}</code>
+
+⚡ 立即生效，无需重启`, null, null, true);
 			console.log(`[AI] 管理员 ${userId} 更新了 API Key`);
 		} catch (e) {
 			await sendTelegramMessage(chatId, `❌ 更新失败: ${e.message}`, null, null, true);
@@ -3550,22 +3573,13 @@ Environment=DEEPSEEK_API_KEY=${newKey}`;
 		}
 		
 		try {
-			// 更新 systemd override 文件
-			const fs = require('fs');
-			const overridePath = '/etc/systemd/system/tg-unban-bot.service.d/ai-override.conf';
-			let content = fs.readFileSync(overridePath, 'utf8');
-			
-			// 替换或添加 DEEPSEEK_BASE_URL
-			if (content.includes('DEEPSEEK_BASE_URL=')) {
-				content = content.replace(/DEEPSEEK_BASE_URL=.*/g, `DEEPSEEK_BASE_URL=${newUrl}`);
-			} else {
-				content += `
-Environment=DEEPSEEK_BASE_URL=${newUrl}`;
-			}
-			
-			fs.writeFileSync(overridePath, content);
-			
-			await sendTelegramMessage(chatId, `✅ <b>API 地址已更新</b>\n\n新地址: <code>${newUrl}</code>\n\n⚠️ 请运行 <code>/restartai</code> 或点击面板按钮重启服务生效`, null, null, true);
+			if (typeof env.SAVE_AI_ENDPOINT !== 'function') throw new Error('当前部署不支持在线修改');
+			env.SAVE_AI_ENDPOINT({ baseUrl: newUrl });
+			await sendTelegramMessage(chatId, `✅ <b>API 地址已更新</b>
+
+新地址: <code>${newUrl}</code>
+
+⚡ 立即生效，无需重启`, null, null, true);
 			console.log(`[AI] 管理员 ${userId} 更新了 API 地址`);
 		} catch (e) {
 			await sendTelegramMessage(chatId, `❌ 更新失败: ${e.message}`, null, null, true);
@@ -3580,17 +3594,7 @@ Environment=DEEPSEEK_BASE_URL=${newUrl}`;
 		if (!isPrivateOrManagedGroup(message)) return;
 		if (!(await checkCommandAdmin(userId, message))) return;
 		
-		await sendTelegramMessage(chatId, '⏳ 正在重启服务...', null, null, true);
-		
-		try {
-			const { execSync } = require('child_process');
-			execSync('sudo systemctl restart tg-unban-bot', { timeout: 10000 });
-			await sendTelegramMessage(chatId, '✅ <b>服务已重启</b>\n\n新的 API 配置已生效！', null, null, true);
-			console.log(`[AI] 管理员 ${userId} 重启了服务`);
-		} catch (e) {
-			await sendTelegramMessage(chatId, `❌ <b>重启失败</b>\n\n错误: ${e.message}`, null, null, true);
-			console.error('[AI] 重启服务失败:', e.message);
-		}
+		await sendTelegramMessage(chatId, '⚡ <b>无需重启</b>\n\nAI 配置修改后立即生效。\n用 <code>/panel</code> → AI 智能功能 → 🔑 配置 API 查看当前接入信息。', null, null, true);
 		return;
 	}
 
@@ -7286,6 +7290,86 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 		if (message) await editMessageText(chatId, message.message_id, msg, markup);
 		else await sendTelegramMessage(chatId, msg, markup);
 		try { await answerCallbackQuery(callbackQuery.id, '✅ 已更新'); } catch (_) {}
+		return true;
+	}
+
+	// AI 接入配置面板（显示当前 Key / 地址 / 模型）
+	if (action === 'aiconfig') {
+		const cur = (typeof env.GET_AI_ENDPOINT === 'function' ? env.GET_AI_ENDPOINT() : null) || {};
+		const apiKey = cur.apiKey || '';
+		const baseUrl = cur.baseUrl || '';
+		const model = cur.model || '';
+		const online = typeof env.SAVE_AI_ENDPOINT === 'function';
+		const msg = '🔑 <b>AI 接入配置</b>\n\n' +
+			'<b>API Key</b>\n<code>' + (apiKey ? escapeHtml(apiKey) : '未配置') + '</code>\n\n' +
+			'<b>API 地址</b>\n<code>' + (baseUrl ? escapeHtml(baseUrl) : '未配置') + '</code>\n\n' +
+			'<b>模型</b> <code>' + (model ? escapeHtml(model) : '未配置') + '</code>\n\n' +
+			'<b>状态</b> ' + (env.AI ? '✅ 已连接' : '❌ 未配置或 Key 无效') + '\n\n' +
+			(online
+				? '点击下面按钮 → 机器人会发一条提示，<b>直接回复那条消息</b>输入新值即可，保存后立即生效（无需重启）。'
+				: '⚠️ 当前部署不支持在线修改，请用 <code>/setapikey</code> / <code>/setapiurl</code>。');
+		const buttons = [
+			[{ text: '✏️ 修改 API Key', callback_data: 'pnl:aiedit:key' }],
+			[{ text: '🌐 修改 API 地址', callback_data: 'pnl:aiedit:url' }],
+			[{ text: '🤖 修改模型', callback_data: 'pnl:aiedit:model' }],
+			[{ text: '🧪 测试连接', callback_data: 'pnl:aitest' }],
+			[{ text: '⬅️ 返回 AI 菜单', callback_data: 'pnl:ai' }]
+		];
+		const markup = { inline_keyboard: buttons };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
+		return true;
+	}
+
+	// 点击修改按钮 → 发 ForceReply 提示，等管理员回复输入
+	if (action === 'aiedit') {
+		const field = parts[2];
+		const prompts = {
+			key: '🔑 请输入新的 API Key',
+			url: '🌐 请输入新的 API 地址',
+			model: '🤖 请输入新的模型名称'
+		};
+		const head = prompts[field];
+		if (!head) { try { await answerCallbackQuery(callbackQuery.id); } catch (_) {} return true; }
+		const tips = {
+			key: '例：sk-XNX5Ajd2lKNbF2SEAyOCdWzA8B9M6c8V',
+			url: '例：https://token.sensenova.cn/v1',
+			model: '例：sensenova-6.8-flash-lite'
+		};
+		try { await answerCallbackQuery(callbackQuery.id, '请回复机器人发来的消息'); } catch (_) {}
+		await sendTelegramMessage(
+			chatId,
+			head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值\n（发送后本提示消息会自动删除）',
+			{ force_reply: true, selective: true },
+			message ? message.message_id : undefined
+		);
+		return true;
+	}
+
+	// 测试 AI 连接
+	if (action === 'aitest') {
+		const cur = (typeof env.GET_AI_ENDPOINT === 'function' ? env.GET_AI_ENDPOINT() : null) || {};
+		try { await answerCallbackQuery(callbackQuery.id, '正在测试…'); } catch (_) {}
+		let result;
+		if (!env.AI) {
+			result = '❌ <b>测试失败</b>\n\n未配置 API Key（或 Key 为空）';
+		} else {
+			try {
+				const resp = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+					messages: [{ role: 'user', content: '回复两个字：正常' }]
+				});
+				const txt = extractAiResponseText(resp) || '(空响应)';
+				result = '✅ <b>连接正常</b>\n\n模型: <code>' + escapeHtml(cur.model || '') + '</code>\n' +
+					'地址: <code>' + escapeHtml(cur.baseUrl || '') + '</code>\n' +
+					'返回: <code>' + escapeHtml(String(txt).slice(0, 80)) + '</code>';
+			} catch (e) {
+				result = '❌ <b>测试失败</b>\n\n<code>' + escapeHtml(String(e.message).slice(0, 200)) + '</code>';
+			}
+		}
+		const markup = { inline_keyboard: [[{ text: '⬅️ 返回配置', callback_data: 'pnl:aiconfig' }]] };
+		if (message) await editMessageText(chatId, message.message_id, result, markup);
+		else await sendTelegramMessage(chatId, result, markup);
 		return true;
 	}
 
