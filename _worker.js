@@ -213,7 +213,7 @@ async function generateDailySummary(env, config) {
 	try {
 		const result = await env.DB.prepare('SELECT message_text, username FROM ai_daily_messages WHERE date = ? ORDER BY timestamp ASC LIMIT 200').bind(today).all();
 		const messages = result?.results || [];
-		if (messages.length < 5) return;
+		if (messages.length < 1) { console.log('[AI] 今日无群聊消息, 跳过摘要'); return; }
 
 		const chatLog = messages.map(m => `${m.username}: ${m.message_text}`).join('\n').slice(0, 3000);
 		const aiResult = await env.AI.run('ai', {
@@ -225,7 +225,8 @@ async function generateDailySummary(env, config) {
 		const summary = extractAiResponseText(aiResult);
 		if (!summary) return;
 
-		const chatId = GROUP_ID_SET[0];
+		const chatId = (GROUP_ID_SET && GROUP_ID_SET.length ? GROUP_ID_SET[0] : GROUP_ID);
+		if (!chatId) { console.log('[AI] 未取到主群 ID, 摘要无法发送'); return; }
 		if (chatId) {
 			await sendTelegramMessage(chatId, `📋 <b>今日群聊摘要 (${today})</b>\n\n${summary}`, null, false);
 		}
@@ -240,17 +241,31 @@ async function generateDailySummary(env, config) {
 }
 
 // 检查是否到了摘要时间
-async function checkAndGenerateSummary(env, config) {
-	if (!config.dailySummary || !config.summaryHour) return;
-	try {
-		const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
-		const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+// 取北京时间的小时（0-23）
+function getShanghaiHour() {
+	const h = new Intl.DateTimeFormat('en-US', {
+		timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false
+	}).format(new Date());
+	const n = parseInt(h, 10);
+	return isNaN(n) ? new Date().getHours() : (n % 24);
+}
 
+async function checkAndGenerateSummary(env, config) {
+	if (!config.dailySummary || config.summaryHour === undefined || config.summaryHour === null) return;
+	try {
+		const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+		const hour = getShanghaiHour();
+		const target = Number(config.summaryHour);
+
+		// 当天已发过就跳过
 		if (isDbReady(env)) {
 			const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(AI_LAST_SUMMARY_KEY).first();
 			if (row && row.value === today) return;
 		}
-		if (now.getHours() >= config.summaryHour) { await generateDailySummary(env, config); }
+		// 未到点就不发（target=0 视为 0 点，允许 0~1 点时段触发）
+		if (!(hour >= target || (target === 0 && hour === 23))) return;
+		console.log(`[AI] 摘要定时检查: 北京时间 ${hour}:00 >= 设定 ${target}:00, 开始生成`);
+		await generateDailySummary(env, config);
 	} catch (e) { console.error('[AI] 摘要定时检查失败:', e.message); }
 }
 
@@ -2072,14 +2087,29 @@ async function restoreUserInAllMainGroups(userId, env) {
 	};
 }
 
-// 启动摘要定时器 (每分钟检查一次)
-setInterval(async () => {
+// 定时任务入口（由 Node 适配层 server.js 每分钟调用；CF 版用 Cron Trigger）
+// 注意：定时任务不经过 fetch，必须自行初始化全局配置与数据库
+export async function runScheduledTasks(env) {
 	try {
-		const env = getEnv();
-		const config = await loadAiConfig(env);
-		if (config.dailySummary) { await checkAndGenerateSummary(env, config); }
-	} catch (e) { /* ignore */ }
-}, 60000);
+		const cfg = loadRequiredConfig(env);
+		BOT_TOKEN = cfg.BOT_TOKEN;
+		GROUP_ID = cfg.GROUP_ID;
+		GROUP_ID_SET = cfg.GROUP_ID_SET;
+		await ensureDbReady(env);
+
+		const aiConfig = await getAiConfig(env);
+		if (aiConfig && aiConfig.dailySummary) {
+			// 整点打一条心跳，便于确认调度器存活（每小时一条，不刷屏）
+			if (new Date().getMinutes() === 0) {
+				const h = getShanghaiHour();
+				console.log(`[定时任务] 心跳 北京时间 ${h}:00 | 摘要设定 ${aiConfig.summaryHour}:00 | 每日摘要=${aiConfig.dailySummary}`);
+			}
+			await checkAndGenerateSummary(env, aiConfig);
+		}
+	} catch (e) {
+		console.error('[定时任务] 执行失败:', e && e.message);
+	}
+}
 
 export default {
 	async fetch(request, env, ctx) {
@@ -3512,7 +3542,7 @@ async function handleMessage(message, env) {
 		console.log(`[AI] 管理员 ${userId} 手动触发摘要生成`);
 		
 		// 加载 AI 配置
-		const config = await loadAiConfig(env);
+		const config = await getAiConfig(env);
 		
 		// 重置今日摘要记录，强制生成
 		try {

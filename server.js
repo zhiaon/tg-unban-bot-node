@@ -23,6 +23,22 @@ const DB_PATH = process.env.DB_PATH || join(dirname(fileURLToPath(import.meta.ur
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const workerModule = await import(join(__dirname, '_worker.js'));
 const worker = workerModule.default;
+const runScheduledTasks = workerModule.runScheduledTasks;
+
+// ─── 定时任务调度（每分钟一轮）────────────────────────
+// _worker.js 里的摘要检查依赖 env（KV/DB/AI），必须由适配层注入
+if (typeof runScheduledTasks === 'function') {
+  setInterval(async () => {
+    try {
+      await runScheduledTasks(buildEnv());
+    } catch (e) {
+      console.error('[scheduler] 执行异常:', e && e.message);
+    }
+  }, 60 * 1000);
+  console.log('[scheduler] 定时任务已启动，间隔 60s（每日摘要等）');
+} else {
+  console.warn('[scheduler] _worker.js 未导出 runScheduledTasks，定时任务不可用');
+}
 
 // 加载面板 HTML
 const PANEL_PATH = join(__dirname, 'panel.html');
@@ -203,7 +219,7 @@ function makeAIShim() {
           body: JSON.stringify({
             model: live.model,
             messages,
-            max_tokens: 1000,
+            max_tokens: 2000,
             temperature: 0.3,
             stream: false
           }),
