@@ -2997,9 +2997,12 @@ async function handleMessage(message, env) {
 				const patch = field === 'key' ? { apiKey: val } : field === 'url' ? { baseUrl: val } : { model: val };
 				env.SAVE_AI_ENDPOINT(patch);
 				const label = field === 'key' ? 'API Key' : field === 'url' ? 'API 地址' : '模型';
-				// 就地把提示消息刷回配置面板（显示最新值），不再新增消息
+				// 把提示消息编辑成新的配置面板（显示最新值），面板回到聊天底部
 				const panel = buildAiConfigPanel(env, '✅ <b>' + label + ' 已更新</b>');
-				try { await editMessageText(chatId, panelMsgId, panel.text, panel.markup); } catch (_) {
+				try {
+					await editMessageText(chatId, panelMsgId, panel.text, panel.markup);
+				} catch (_) {
+					try { await deleteMessage(chatId, panelMsgId); } catch (_) {}
 					await sendTelegramMessage(chatId, panel.text, panel.markup);
 				}
 			} catch (e) {
@@ -7361,7 +7364,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 		return true;
 	}
 
-	// 点击修改按钮 → 把「当前这条消息」就地变成输入提示（ForceReply），不新增消息
+	// 点击修改按钮 → 删掉旧面板，在底部发一条 ForceReply 提示（Telegram 不允许把带按钮的消息改成 ForceReply）
 	if (action === 'aiedit') {
 		const field = parts[2];
 		const prompts = {
@@ -7374,28 +7377,16 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 		const tips = {
 			key: '例：sk-xxxxxxxxxxxxxxxxxxxx',
 			url: '例：https://api.example.com/v1',
-			model: '例：gpt-4o-mini'
+			model: '例：deepseek-chat'
 		};
 		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
-		if (message) {
-			// 就地编辑为提示，并挂 ForceReply，输入框会直接聚焦到「回复此消息」
-			try {
-			await editMessageText(
-				chatId,
-				message.message_id,
-				head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值\n保存后本条消息会变回配置面板',
-				{ force_reply: true, selective: true }
-			);
-			} catch (e) {
-				await sendTelegramMessage(chatId,
-					head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值',
-					{ force_reply: true, selective: true });
-			}
-		} else {
-			await sendTelegramMessage(chatId,
-				head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值',
-				{ force_reply: true, selective: true });
-		}
+		// 移除带 inline keyboard 的旧面板（否则无法改造成 ForceReply）
+		if (message) { try { await deleteMessage(chatId, message.message_id); } catch (_) {} }
+		await sendTelegramMessage(
+			chatId,
+			head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值\n保存后本条消息会变回配置面板',
+			{ force_reply: true, selective: true }
+		);
 		return true;
 	}
 
