@@ -7180,6 +7180,9 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					buttons.push(wordButtons.slice(i, i + 2));
 				}
 			}
+			if (words.length > 0) {
+				buttons.push([{ text: '🗑 删除违禁词', callback_data: 'pnl:worddel' }]);
+			}
 			buttons.push(backButton);
 			const markup = { inline_keyboard: buttons };
 			if (message) await editMessageText(chatId, message.message_id, msg, markup);
@@ -7439,6 +7442,69 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 	}
 
 			// 单个违禁词设置页面
+		// 删除违禁词：列出所有词，点一下就删
+		if (action === 'worddel') {
+			const words = await getBannedWords(env);
+			if (words.length === 0) {
+				const emptyMsg = '🗑 <b>删除违禁词</b>\n\n当前没有违禁词。';
+				const emptyMarkup = { inline_keyboard: [[{ text: '⬅️ 返回违禁词管理', callback_data: 'pnl:words' }]] };
+				if (message) await editMessageText(chatId, message.message_id, emptyMsg, emptyMarkup);
+				else await sendTelegramMessage(chatId, emptyMsg, emptyMarkup);
+				try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
+				return true;
+			}
+			const delMsg = '🗑 <b>删除违禁词</b>\n\n点击下面的词 <b>立即删除</b>（无需二次确认）\n当前共 <b>' + words.length + '</b> 个';
+			const delBtns = words.map((w, i) => {
+				const display = w.startsWith('"') && w.endsWith('"') ? w.slice(1, -1) : w;
+				return [{ text: '🗑 ' + display, callback_data: 'pnl:worddelc:' + i }];
+			});
+			delBtns.push([{ text: '⬅️ 返回违禁词管理', callback_data: 'pnl:words' }]);
+			const delMarkup = { inline_keyboard: delBtns };
+			if (message) await editMessageText(chatId, message.message_id, delMsg, delMarkup);
+			else await sendTelegramMessage(chatId, delMsg, delMarkup);
+			try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
+			return true;
+		}
+
+		// 删除指定索引的违禁词
+		if (action === 'worddelc') {
+			const idx = parseInt(parts[2], 10);
+			const words = await getBannedWords(env);
+			let deletedName = '';
+			if (!isNaN(idx) && idx >= 0 && idx < words.length) {
+				const removed = words.splice(idx, 1)[0];
+				await saveBannedWords(env, words);
+				deletedName = removed.startsWith('"') && removed.endsWith('"') ? removed.slice(1, -1) : removed;
+				try { await saveWordRule(env, deletedName, null); } catch (_) {}
+				try { await saveWordRule(env, removed, null); } catch (_) {}
+				console.log('[违禁词] 面板删除: ' + removed);
+				try { await answerCallbackQuery(callbackQuery.id, '已删除 ' + deletedName); } catch (_) {}
+			} else {
+				try { await answerCallbackQuery(callbackQuery.id, '该词已不存在', true); } catch (_) {}
+			}
+
+			const list = await getBannedWords(env);
+			if (list.length === 0) {
+				const doneMsg = (deletedName ? '✅ 已删除 <code>' + escapeHtml(deletedName) + '</code>\n\n' : '') +
+					'🗑 <b>违禁词已全部清空</b>';
+				const doneMarkup = { inline_keyboard: [[{ text: '⬅️ 返回违禁词管理', callback_data: 'pnl:words' }]] };
+				if (message) await editMessageText(chatId, message.message_id, doneMsg, doneMarkup);
+				else await sendTelegramMessage(chatId, doneMsg, doneMarkup);
+				return true;
+			}
+			const head = (deletedName ? '✅ 已删除 <code>' + escapeHtml(deletedName) + '</code>\n\n' : '');
+			const msg2 = head + '🗑 <b>删除违禁词</b>\n\n点击下面的词 <b>立即删除</b>\n剩余 <b>' + list.length + '</b> 个';
+			const btns2 = list.map((w, i) => {
+				const display = w.startsWith('"') && w.endsWith('"') ? w.slice(1, -1) : w;
+				return [{ text: '🗑 ' + display, callback_data: 'pnl:worddelc:' + i }];
+			});
+			btns2.push([{ text: '⬅️ 返回违禁词管理', callback_data: 'pnl:words' }]);
+			const markup2 = { inline_keyboard: btns2 };
+			if (message) await editMessageText(chatId, message.message_id, msg2, markup2);
+			else await sendTelegramMessage(chatId, msg2, markup2);
+			return true;
+		}
+
 		if (action === 'bwri') {
 			const idx = parseInt(parts[2]);
 			const words = await getBannedWords(env);
