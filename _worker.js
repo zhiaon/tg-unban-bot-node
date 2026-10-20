@@ -2979,44 +2979,40 @@ async function handleMessage(message, env) {
 	const userId = message.from.id;
 	const text = message.text;
 	const username = message.from.username || message.from.first_name || '用户';
-	// AI 配置输入（回复机器人 ForceReply 提示）—— 保存后立即生效，无需重启
-	if (message.reply_to_message && message.text && message.reply_to_message.from && message.reply_to_message.from.is_bot) {
-		const rtText = message.reply_to_message.text || '';
-		const field = rtText.startsWith('🔑 请输入新的 API Key') ? 'key'
-			: rtText.startsWith('🌐 请输入新的 API 地址') ? 'url'
-			: rtText.startsWith('🤖 请输入新的模型名称') ? 'model' : null;
-		if (field) {
-			if (!(await checkCommandAdmin(userId, message))) {
-				await sendTelegramMessage(chatId, '❌ 仅管理员可修改 AI 配置', null, message.message_id);
+	// AI 配置输入（等待态：用户在配置面板点了「修改」按钮后直接发新值）
+	{
+		const pendKey = String(userId);
+		const pend = pendingAiEdit.get(pendKey);
+		if (pend && message.text && !message.text.startsWith('/')) {
+			if (Date.now() - pend.at > 5 * 60 * 1000) {
+				pendingAiEdit.delete(pendKey);
+			} else if (await checkCommandAdmin(userId, message)) {
+				pendingAiEdit.delete(pendKey);
+				const val = message.text.trim();
+				const field = pend.field;
+				const label = field === 'key' ? 'API Key' : field === 'url' ? 'API 地址' : '模型';
+				let note;
+				try {
+					if (typeof env.SAVE_AI_ENDPOINT !== 'function') throw new Error('当前部署不支持在线修改');
+					const patch = field === 'key' ? { apiKey: val } : field === 'url' ? { baseUrl: val } : { model: val };
+					env.SAVE_AI_ENDPOINT(patch);
+					note = '✅ <b>' + label + ' 已更新</b>';
+				} catch (e) {
+					note = '❌ 更新失败: ' + escapeHtml(e.message);
+				}
+				// 就地把面板刷回配置界面（inline keyboard → inline keyboard，Telegram 允许）
+				const panel = buildAiConfigPanel(env, note);
+				try {
+					await editMessageText(pend.chatId, pend.panelMsgId, panel.text, panel.markup);
+				} catch (e) {
+					console.error('[AI配置] 面板刷新失败:', e.message);
+				}
+				// 尝试删除含 Key 的这条消息（私聊里 bot 无权限时忽略）
+				try { await deleteMessage(chatId, message.message_id); } catch (_) {}
 				return;
 			}
-			const val = message.text.trim();
-			const panelMsgId = message.reply_to_message.message_id;
-			try {
-				if (typeof env.SAVE_AI_ENDPOINT !== 'function') throw new Error('当前部署不支持在线修改');
-				const patch = field === 'key' ? { apiKey: val } : field === 'url' ? { baseUrl: val } : { model: val };
-				env.SAVE_AI_ENDPOINT(patch);
-				const label = field === 'key' ? 'API Key' : field === 'url' ? 'API 地址' : '模型';
-				// 把提示消息编辑成新的配置面板（显示最新值），面板回到聊天底部
-				const panel = buildAiConfigPanel(env, '✅ <b>' + label + ' 已更新</b>');
-				try {
-					await editMessageText(chatId, panelMsgId, panel.text, panel.markup);
-				} catch (_) {
-					try { await deleteMessage(chatId, panelMsgId); } catch (_) {}
-					await sendTelegramMessage(chatId, panel.text, panel.markup);
-				}
-			} catch (e) {
-				const panel = buildAiConfigPanel(env, '❌ 更新失败: ' + escapeHtml(e.message));
-				try { await editMessageText(chatId, panelMsgId, panel.text, panel.markup); } catch (_) {
-					await sendTelegramMessage(chatId, panel.text, panel.markup);
-				}
-			}
-			// 删除你发的那条含 Key 的消息（私聊里 bot 可能无权限，失败忽略）
-			try { await deleteMessage(chatId, message.message_id); } catch (_) {}
-			return;
 		}
 	}
-
 
 	// 联网黑名单自动查杀(消息路径):真人发送的每条消息(任意聊天,含任一主群与其他群/私聊)
 	// 都过一遍查杀;是否真正触发由函数内部守卫决定(群聊类型 + 绑定 D1 + bot 是群管理员)。
@@ -7055,6 +7051,9 @@ async function handleClearWarnCallbackQuery(callbackQuery, env) {
 }
 
 // ========================================================
+// 等待用户输入 AI 配置的会话状态：userId -> { chatId, panelMsgId, field, at }
+const pendingAiEdit = new Map();
+
 // 渲染 AI 接入配置面板（aiconfig 分支与保存后刷新共用）
 function buildAiConfigPanel(env, note) {
 	const cur = (typeof env.GET_AI_ENDPOINT === 'function' ? env.GET_AI_ENDPOINT() : null) || {};
@@ -7357,6 +7356,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 
 	// AI 接入配置面板（显示当前 Key / 地址 / 模型）
 	if (action === 'aiconfig') {
+		pendingAiEdit.delete(String(userId));
 		const panel = buildAiConfigPanel(env, '');
 		if (message) await editMessageText(chatId, message.message_id, panel.text, panel.markup);
 		else await sendTelegramMessage(chatId, panel.text, panel.markup);
@@ -7364,7 +7364,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 		return true;
 	}
 
-	// 点击修改按钮 → 删掉旧面板，在底部发一条 ForceReply 提示（Telegram 不允许把带按钮的消息改成 ForceReply）
+	// 点击修改按钮 → 就地编辑面板为输入提示（不删消息、不新增消息）
 	if (action === 'aiedit') {
 		const field = parts[2];
 		const prompts = {
@@ -7379,14 +7379,18 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			url: '例：https://api.example.com/v1',
 			model: '例：deepseek-chat'
 		};
-		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
-		// 移除带 inline keyboard 的旧面板（否则无法改造成 ForceReply）
-		if (message) { try { await deleteMessage(chatId, message.message_id); } catch (_) {} }
-		await sendTelegramMessage(
-			chatId,
-			head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值\n保存后本条消息会变回配置面板',
-			{ force_reply: true, selective: true }
-		);
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id); } catch (_) {} return true; }
+		pendingAiEdit.set(String(userId), {
+			chatId, panelMsgId: message.message_id, field, at: Date.now()
+		});
+		try { await answerCallbackQuery(callbackQuery.id, '在下方直接发送新值'); } catch (_) {}
+		const text = head + '\n' + tips[field] + '\n\n<b>直接发送新值即可</b>（不用回复，5 分钟内有效）\n保存后本面板会自动刷新';
+		const markup = { inline_keyboard: [[{ text: '✖️ 取消', callback_data: 'pnl:aiconfig' }]] };
+		try {
+			await editMessageText(chatId, message.message_id, text, markup);
+		} catch (e) {
+			console.error('[AI配置] 进入输入态失败:', e.message);
+		}
 		return true;
 	}
 
