@@ -2244,6 +2244,7 @@ async function handleInitialization(request) {
 			{ command: "addfaq", description: "添加FAQ问答 (管理员)" },
 			{ command: "delfaq", description: "删除FAQ问答 (管理员)" },
 			{ command: "listfaq", description: "查看FAQ列表 (管理员)" },
+			{ command: "summary", description: "手动生成今日摘要 (管理员)" },
 				{ command: "delwords", description: "删除违禁词 (管理员)" },
 				{ command: "listwords", description: "查看所有违禁词 (管理员)" },
 				{ command: "clearwarn", description: "清除违禁词警告 (管理员)" },
@@ -3461,6 +3462,34 @@ async function handleMessage(message, env) {
 		}
 		const faqList = faqs.map((f, i) => `${i + 1}. <b>Q:</b> ${escapeHtml(f.question)}\n   <b>A:</b> ${escapeHtml(f.answer)}`).join('\n\n');
 		await sendTelegramMessage(chatId, `📋 <b>FAQ列表</b> (共 ${faqs.length} 条)\n\n${faqList}`, null, null, true);
+		return;
+	}
+
+	// 管理员: /summary — 手动生成今日摘要
+	const summaryCmd = parseCommand(text, 'summary');
+	if (summaryCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		
+		console.log(`[AI] 管理员 ${userId} 手动触发摘要生成`);
+		
+		// 重置今日摘要记录，强制生成
+		try {
+			if (isDbReady(env)) {
+				await env.DB.prepare('DELETE FROM schema_meta WHERE key = ?').bind(AI_LAST_SUMMARY_KEY).run();
+			}
+		} catch (e) {
+			console.error('[AI] 清除摘要记录失败:', e.message);
+		}
+		
+		// 直接调用摘要生成
+		try {
+			await generateDailySummary(env, config);
+			await sendTelegramMessage(chatId, '✅ 摘要已发送到群聊', null, null, true);
+		} catch (e) {
+			console.error('[AI] 手动摘要生成失败:', e.message);
+			await sendTelegramMessage(chatId, `❌ 摘要生成失败: ${e.message}`, null, null, true);
+		}
 		return;
 	}
 
