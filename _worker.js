@@ -2979,6 +2979,36 @@ async function handleMessage(message, env) {
 	const userId = message.from.id;
 	const text = message.text;
 	const username = message.from.username || message.from.first_name || '用户';
+	// 违禁词添加：等待用户发词
+	{
+		const wKey = String(userId);
+		const wPend = pendingWordAdd.get(wKey);
+		if (wPend && message.text && !message.text.startsWith('/')) {
+			if (Date.now() - wPend.at > 5 * 60 * 1000) {
+				pendingWordAdd.delete(wKey);
+			} else if (await checkCommandAdmin(userId, message)) {
+				const word = message.text.trim().slice(0, 100);
+				wPend.word = word;
+				wPend.at = Date.now();
+				const pickMsg = '➕ <b>添加违禁词</b>\n\n词：<code>' + escapeHtml(word) + '</code>\n\n<b>选择匹配方式：</b>\n\n' +
+					'• 🔍 <b>包含匹配</b>：消息里出现这个词就触发\n' +
+					'• 🎯 <b>精确匹配</b>：整条消息就是这个词才触发';
+				const pickMarkup = { inline_keyboard: [
+					[{ text: '🔍 包含匹配', callback_data: 'pnl:wordaddm:contain' }],
+					[{ text: '🎯 精确匹配', callback_data: 'pnl:wordaddm:exact' }],
+					[{ text: '✖️ 取消', callback_data: 'pnl:words' }]
+				] };
+				try {
+					await editMessageText(wPend.chatId, wPend.panelMsgId, pickMsg, pickMarkup);
+				} catch (e) {
+					await sendTelegramMessage(wPend.chatId, pickMsg, pickMarkup);
+				}
+				try { await deleteMessage(chatId, message.message_id); } catch (_) {}
+				return;
+			}
+		}
+	}
+
 	// AI 配置输入（等待态：用户在配置面板点了「修改」按钮后直接发新值）
 	{
 		const pendKey = String(userId);
@@ -3396,7 +3426,7 @@ async function handleMessage(message, env) {
 					]
 				};
 				const skipText = skipped.length > 0 ? `\n⚠️ 已存在(跳过): ${skipped.map(s => '<code>' + escapeHtml(s) + '</code>').join(', ')}` : '';
-				await sendTelegramMessage(chatId, `✅ 已添加违禁词: <code>${escapeHtml(display)}</code>\n请选择处罚方式：${skipText}`, JSON.stringify(keyboard), null, true);
+				await sendTelegramMessage(chatId, `✅ 已添加违禁词: <code>${escapeHtml(display)}</code>\n请选择处罚方式：${skipText}`, keyboard, null, true);
 			}
 		} else {
 			let msg = `⚠️ 全部已存在，未添加新词`;
@@ -6215,7 +6245,7 @@ async function handleBannedWordCallbackQuery(callbackQuery, env) {
 			await answerCallbackQuery(callbackQuery.id);
 			await editMessageText(chatId, message.message_id,
 				`✅ 违禁词: <code>${escapeHtml(display)}</code>\n处罚方式: ${punishLabel}\n请选择触发次数（达到此次后执行处罚）：`,
-				JSON.stringify(keyboard));
+				keyboard);
 		} else if (step === 'c') {
 			// 用户选择了触发次数，保存规则
 			const count = parseInt(parts[2]);
@@ -6235,7 +6265,8 @@ async function handleBannedWordCallbackQuery(callbackQuery, env) {
 
 			await answerCallbackQuery(callbackQuery.id, `已保存: ${punishLabel} ${count}次`);
 			await editMessageText(chatId, message.message_id,
-				`✅ <b>违禁词规则已保存</b>\n\n违禁词: <code>${escapeHtml(display)}</code>\n处罚: ${punishLabel}\n触发次数: ${count}次`);
+				`✅ <b>违禁词规则已保存</b>\n\n违禁词: <code>${escapeHtml(display)}</code>\n处罚: ${punishLabel}\n触发次数: ${count}次`,
+				{ inline_keyboard: [[{ text: '⬅️ 返回违禁词管理', callback_data: 'pnl:words' }]] });
 
 			// 20秒后自动删除
 			setTimeout(async () => {
@@ -7051,6 +7082,9 @@ async function handleClearWarnCallbackQuery(callbackQuery, env) {
 }
 
 // ========================================================
+// 等待用户输入违禁词的会话状态：userId -> { chatId, panelMsgId, word, at }
+const pendingWordAdd = new Map();
+
 // 等待用户输入 AI 配置的会话状态：userId -> { chatId, panelMsgId, field, at }
 const pendingAiEdit = new Map();
 
@@ -7143,6 +7177,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 
 		// 违禁词管理
 		if (action === 'words') {
+			pendingWordAdd.delete(String(userId));
 			const words = await getBannedWords(env);
 			const config = await getBannedWordsConfig(env);
 			bannedWordsConfig = config;
@@ -7180,6 +7215,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					buttons.push(wordButtons.slice(i, i + 2));
 				}
 			}
+			buttons.push([{ text: '➕ 添加违禁词', callback_data: 'pnl:wordadd' }]);
 			if (words.length > 0) {
 				buttons.push([{ text: '🗑 删除违禁词', callback_data: 'pnl:worddel' }]);
 			}
@@ -7442,6 +7478,59 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 	}
 
 			// 单个违禁词设置页面
+		// 添加违禁词：进入输入态
+		if (action === 'wordadd') {
+			if (!message) { try { await answerCallbackQuery(callbackQuery.id); } catch (_) {} return true; }
+			pendingWordAdd.set(String(userId), {
+				chatId, panelMsgId: message.message_id, word: '', at: Date.now()
+			});
+			const hintMsg = '➕ <b>添加违禁词</b>\n\n<b>直接发送要添加的词</b>（5 分钟内有效）\n\n' +
+				'发送后会让你选匹配方式，再选处罚方式。\n' +
+				'多个词请分次添加。';
+			const hintMarkup = { inline_keyboard: [[{ text: '✖️ 取消', callback_data: 'pnl:words' }]] };
+			try { await editMessageText(chatId, message.message_id, hintMsg, hintMarkup); } catch (_) {}
+			try { await answerCallbackQuery(callbackQuery.id, '请发送要添加的词'); } catch (_) {}
+			return true;
+		}
+
+		// 添加违禁词：选择匹配方式后落库
+		if (action === 'wordaddm') {
+			const mode = parts[2];
+			const pend = pendingWordAdd.get(String(userId));
+			if (!pend || !pend.word) {
+				try { await answerCallbackQuery(callbackQuery.id, '输入已超时，请重新添加', true); } catch (_) {}
+				return true;
+			}
+			pendingWordAdd.delete(String(userId));
+			const rawWord = pend.word;
+			const finalWord = mode === 'exact' ? '"' + rawWord + '"' : rawWord;
+			const current = await getBannedWords(env);
+			const dup = current.some(w => w.toLowerCase() === finalWord.toLowerCase());
+			if (dup) {
+				try { await answerCallbackQuery(callbackQuery.id, '该词已存在', true); } catch (_) {}
+				const dupMsg = '⚠️ <code>' + escapeHtml(rawWord) + '</code> 已存在，未重复添加';
+				const dupMarkup = { inline_keyboard: [[{ text: '⬅️ 返回违禁词管理', callback_data: 'pnl:words' }]] };
+				try { await editMessageText(chatId, message.message_id, dupMsg, dupMarkup); } catch (_) {}
+				return true;
+			}
+			current.push(finalWord);
+			await saveBannedWords(env, current);
+			console.log('[违禁词] 面板添加: ' + finalWord);
+			try { await answerCallbackQuery(callbackQuery.id, '已添加，请选处罚方式'); } catch (_) {}
+			const typeLabel = mode === 'exact' ? '🎯 精确匹配' : '🔍 包含匹配';
+			const wordMarkup = { inline_keyboard: [
+				[{ text: '🔇 禁言', callback_data: `bw:t:mute:${finalWord}` }],
+				[{ text: '👢 踢出', callback_data: `bw:t:kick:${finalWord}` }],
+				[{ text: '🔨 封禁+拉黑', callback_data: `bw:t:ban:${finalWord}` }]
+			] };
+			const wordMsg = '✅ 已添加 <code>' + escapeHtml(rawWord) + '</code>（' + typeLabel + '）\n\n' +
+				'<b>请选择处罚方式：</b>';
+			try { await editMessageText(chatId, message.message_id, wordMsg, wordMarkup); } catch (_) {
+				await sendTelegramMessage(chatId, wordMsg, wordMarkup);
+			}
+			return true;
+		}
+
 		// 删除违禁词：列出所有词，点一下就删
 		if (action === 'worddel') {
 			const words = await getBannedWords(env);
