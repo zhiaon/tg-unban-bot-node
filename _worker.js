@@ -2961,22 +2961,25 @@ async function handleMessage(message, env) {
 				return;
 			}
 			const val = message.text.trim();
-			// 尝试删除含秘钥的原消息（群内防泄漏）
-			try { await deleteMessage(chatId, message.message_id); } catch (_) {}
-			try { await deleteMessage(chatId, message.reply_to_message.message_id); } catch (_) {}
+			const panelMsgId = message.reply_to_message.message_id;
 			try {
 				if (typeof env.SAVE_AI_ENDPOINT !== 'function') throw new Error('当前部署不支持在线修改');
 				const patch = field === 'key' ? { apiKey: val } : field === 'url' ? { baseUrl: val } : { model: val };
 				env.SAVE_AI_ENDPOINT(patch);
 				const label = field === 'key' ? 'API Key' : field === 'url' ? 'API 地址' : '模型';
-				const shown = field === 'key' && val.length > 12 ? val.slice(0, 8) + '****' + val.slice(-4) : val;
-				await sendTelegramMessage(chatId,
-					'✅ <b>' + label + ' 已更新</b>\n\n<code>' + escapeHtml(shown) + '</code>\n\n' +
-					'⚡ 立即生效，无需重启。发送 <code>/panel</code> → AI 智能功能 → 🔑 配置 API 查看',
-					null, null, true);
+				// 就地把提示消息刷回配置面板（显示最新值），不再新增消息
+				const panel = buildAiConfigPanel(env, '✅ <b>' + label + ' 已更新</b>');
+				try { await editMessageText(chatId, panelMsgId, panel.text, panel.markup); } catch (_) {
+					await sendTelegramMessage(chatId, panel.text, panel.markup);
+				}
 			} catch (e) {
-				await sendTelegramMessage(chatId, '❌ 更新失败: ' + escapeHtml(e.message), null, null, true);
+				const panel = buildAiConfigPanel(env, '❌ 更新失败: ' + escapeHtml(e.message));
+				try { await editMessageText(chatId, panelMsgId, panel.text, panel.markup); } catch (_) {
+					await sendTelegramMessage(chatId, panel.text, panel.markup);
+				}
 			}
+			// 删除你发的那条含 Key 的消息（私聊里 bot 可能无权限，失败忽略）
+			try { await deleteMessage(chatId, message.message_id); } catch (_) {}
 			return;
 		}
 	}
@@ -7019,6 +7022,32 @@ async function handleClearWarnCallbackQuery(callbackQuery, env) {
 }
 
 // ========================================================
+// 渲染 AI 接入配置面板（aiconfig 分支与保存后刷新共用）
+function buildAiConfigPanel(env, note) {
+	const cur = (typeof env.GET_AI_ENDPOINT === 'function' ? env.GET_AI_ENDPOINT() : null) || {};
+	const apiKey = cur.apiKey || '';
+	const baseUrl = cur.baseUrl || '';
+	const model = cur.model || '';
+	const online = typeof env.SAVE_AI_ENDPOINT === 'function';
+	const text = (note ? note + '\n\n' : '') +
+		'🔑 <b>AI 接入配置</b>\n\n' +
+		'<b>API Key</b>\n<code>' + (apiKey ? escapeHtml(apiKey) : '未配置') + '</code>\n\n' +
+		'<b>API 地址</b>\n<code>' + (baseUrl ? escapeHtml(baseUrl) : '未配置') + '</code>\n\n' +
+		'<b>模型</b> <code>' + (model ? escapeHtml(model) : '未配置') + '</code>\n\n' +
+		'<b>状态</b> ' + (env.AI ? '✅ 已连接' : '❌ 未配置或 Key 无效') + '\n\n' +
+		(online
+			? '点按钮 → 本条消息会变成输入提示，<b>直接回复它</b>发送新值，保存后就地刷新（不新增消息）。'
+			: '⚠️ 当前部署不支持在线修改，请用 <code>/setapikey</code> / <code>/setapiurl</code>。');
+	const markup = { inline_keyboard: [
+		[{ text: '✏️ 修改 API Key', callback_data: 'pnl:aiedit:key' }],
+		[{ text: '🌐 修改 API 地址', callback_data: 'pnl:aiedit:url' }],
+		[{ text: '🤖 修改模型', callback_data: 'pnl:aiedit:model' }],
+		[{ text: '🧪 测试连接', callback_data: 'pnl:aitest' }],
+		[{ text: '⬅️ 返回 AI 菜单', callback_data: 'pnl:ai' }]
+	] };
+	return { text, markup };
+}
+
 // 管理面板回调处理 (pnl: 前缀)
 // ========================================================
 async function handlePanelCallbackQuery(callbackQuery, env) {
@@ -7295,34 +7324,14 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 
 	// AI 接入配置面板（显示当前 Key / 地址 / 模型）
 	if (action === 'aiconfig') {
-		const cur = (typeof env.GET_AI_ENDPOINT === 'function' ? env.GET_AI_ENDPOINT() : null) || {};
-		const apiKey = cur.apiKey || '';
-		const baseUrl = cur.baseUrl || '';
-		const model = cur.model || '';
-		const online = typeof env.SAVE_AI_ENDPOINT === 'function';
-		const msg = '🔑 <b>AI 接入配置</b>\n\n' +
-			'<b>API Key</b>\n<code>' + (apiKey ? escapeHtml(apiKey) : '未配置') + '</code>\n\n' +
-			'<b>API 地址</b>\n<code>' + (baseUrl ? escapeHtml(baseUrl) : '未配置') + '</code>\n\n' +
-			'<b>模型</b> <code>' + (model ? escapeHtml(model) : '未配置') + '</code>\n\n' +
-			'<b>状态</b> ' + (env.AI ? '✅ 已连接' : '❌ 未配置或 Key 无效') + '\n\n' +
-			(online
-				? '点击下面按钮 → 机器人会发一条提示，<b>直接回复那条消息</b>输入新值即可，保存后立即生效（无需重启）。'
-				: '⚠️ 当前部署不支持在线修改，请用 <code>/setapikey</code> / <code>/setapiurl</code>。');
-		const buttons = [
-			[{ text: '✏️ 修改 API Key', callback_data: 'pnl:aiedit:key' }],
-			[{ text: '🌐 修改 API 地址', callback_data: 'pnl:aiedit:url' }],
-			[{ text: '🤖 修改模型', callback_data: 'pnl:aiedit:model' }],
-			[{ text: '🧪 测试连接', callback_data: 'pnl:aitest' }],
-			[{ text: '⬅️ 返回 AI 菜单', callback_data: 'pnl:ai' }]
-		];
-		const markup = { inline_keyboard: buttons };
-		if (message) await editMessageText(chatId, message.message_id, msg, markup);
-		else await sendTelegramMessage(chatId, msg, markup);
+		const panel = buildAiConfigPanel(env, '');
+		if (message) await editMessageText(chatId, message.message_id, panel.text, panel.markup);
+		else await sendTelegramMessage(chatId, panel.text, panel.markup);
 		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
 		return true;
 	}
 
-	// 点击修改按钮 → 发 ForceReply 提示，等管理员回复输入
+	// 点击修改按钮 → 把「当前这条消息」就地变成输入提示（ForceReply），不新增消息
 	if (action === 'aiedit') {
 		const field = parts[2];
 		const prompts = {
@@ -7337,13 +7346,26 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			url: '例：https://api.example.com/v1',
 			model: '例：gpt-4o-mini'
 		};
-		try { await answerCallbackQuery(callbackQuery.id, '请回复机器人发来的消息'); } catch (_) {}
-		await sendTelegramMessage(
-			chatId,
-			head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值\n（发送后本提示消息会自动删除）',
-			{ force_reply: true, selective: true },
-			message ? message.message_id : undefined
-		);
+		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
+		if (message) {
+			// 就地编辑为提示，并挂 ForceReply，输入框会直接聚焦到「回复此消息」
+			try {
+			await editMessageText(
+				chatId,
+				message.message_id,
+				head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值\n保存后本条消息会变回配置面板',
+				{ force_reply: true, selective: true }
+			);
+			} catch (e) {
+				await sendTelegramMessage(chatId,
+					head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值',
+					{ force_reply: true, selective: true });
+			}
+		} else {
+			await sendTelegramMessage(chatId,
+				head + '\n' + tips[field] + '\n\n直接 <b>回复这条消息</b> 发送新值',
+				{ force_reply: true, selective: true });
+		}
 		return true;
 	}
 
