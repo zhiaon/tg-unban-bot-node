@@ -2266,24 +2266,8 @@ async function handleInitialization(request) {
 		const setCommandsUrl = `https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`;
 		const setCommandsBody = {
 			commands: [
-				{ command: "unban", description: "开始自助解封" },
-				{ command: "ban", description: "添加用户到黑名单 (管理员)" },
-				{ command: "spam", description: "回复消息添加用户到黑名单 (管理员)" },
-				{ command: "check", description: "查询用户封禁状态 (管理员)" },
-				{ command: "addwords", description: "添加违禁词 (管理员)" },
-			{ command: "addfaq", description: "添加FAQ问答 (管理员)" },
-			{ command: "delfaq", description: "删除FAQ问答 (管理员)" },
-			{ command: "listfaq", description: "查看FAQ列表 (管理员)" },
-			{ command: "summary", description: "手动生成今日摘要 (管理员)" },
-			{ command: "setapikey", description: "修改 AI API Key (管理员)" },
-			{ command: "setapiurl", description: "修改 AI API 地址 (管理员)" },
-			{ command: "restartai", description: "重启服务生效 (管理员)" },
-				{ command: "delwords", description: "删除违禁词 (管理员)" },
-				{ command: "listwords", description: "查看所有违禁词 (管理员)" },
-				{ command: "clearwarn", description: "清除违禁词警告 (管理员)" },
-				{ command: "warns", description: "查看用户警告次数 (管理员)" },
-				{ command: "autoreply", description: "管理自动回复 (管理员)" },
-				{ command: "panel", description: "管理面板 (管理员)" }
+				{ command: "panel", description: "管理面板 (管理员)" },
+				{ command: "unban", description: "开始自助解封" }
 			]
 		};
 
@@ -3002,6 +2986,109 @@ async function handleMessage(message, env) {
 					await editMessageText(wPend.chatId, wPend.panelMsgId, pickMsg, pickMarkup);
 				} catch (e) {
 					await sendTelegramMessage(wPend.chatId, pickMsg, pickMarkup);
+				}
+				try { await deleteMessage(chatId, message.message_id); } catch (_) {}
+				return;
+			}
+		}
+	}
+
+	// 面板输入态(全按钮化): 用户在面板点了「添加/封禁/查询」类按钮后直接发内容
+	{
+		const piKey = String(userId);
+		const piPend = pendingPanelInput.get(piKey);
+		if (piPend && message.text && !message.text.startsWith('/')) {
+			if (Date.now() - piPend.at > 5 * 60 * 1000) {
+				pendingPanelInput.delete(piKey);
+			} else if (await checkCommandAdmin(userId, message)) {
+				const val = message.text.trim();
+				pendingPanelInput.delete(piKey);
+				const act = piPend.action;
+				const reenter = () => pendingPanelInput.set(piKey, { chatId: piPend.chatId, panelMsgId: piPend.panelMsgId, action: act, back: piPend.back, at: Date.now() });
+				let out = null;
+				if (act === 'banadd') {
+					if (!/^\d+$/.test(val)) {
+						out = { text: '❌ 请输入纯数字用户 ID\n\n例：<code>123456789</code>' };
+						reenter();
+					} else {
+						const res = await addToBlacklist(val, env, 'ban', userId);
+						out = { text: (res.success ? '✅ 已加入黑名单' : '❌ 加入失败') +
+							'\n\n用户 ID：<code>' + escapeHtml(val) + '</code>' +
+							(res.message ? '\n' + escapeHtml(res.message) : '') };
+					}
+				} else if (act === 'query') {
+					if (!/^\d+$/.test(val)) {
+						out = { text: '❌ 请输入纯数字用户 ID\n\n例：<code>123456789</code>' };
+						reenter();
+					} else {
+						try {
+							const resp = await buildBanlistCheckResponse(val, { env: env, includeReviewAction: false });
+							out = { text: resp.text || '(无结果)', markup: resp.replyMarkup };
+						} catch (e) {
+							out = { text: '❌ 查询失败：' + escapeHtml(e.message) };
+						}
+					}
+				} else if (act === 'faqadd') {
+					if (!val.includes('|')) {
+						out = { text: '❌ 格式错误\n\n请用：<code>问题 | 答案</code>' };
+						reenter();
+					} else {
+						const sp = val.split('|');
+						const q = sp[0].trim();
+						const a = sp.slice(1).join('|').trim();
+						if (!q || !a) {
+							out = { text: '❌ 问题和答案不能为空' };
+							reenter();
+						} else {
+							const faqs = await getFaqs(env);
+							faqs.push({ question: q, answer: a });
+							await saveFaqs(env, faqs);
+							out = { text: '✅ 已添加 FAQ #' + faqs.length + '\n\n<b>Q:</b> ' + escapeHtml(q) + '\n<b>A:</b> ' + escapeHtml(a) };
+						}
+					}
+				} else if (act === 'aradd') {
+					if (!val.includes('=')) {
+						out = { text: '❌ 格式错误\n\n请用：<code>关键词=回复内容</code>' };
+						reenter();
+					} else {
+						const eq = val.indexOf('=');
+						const kw = val.slice(0, eq).trim();
+						const rp = val.slice(eq + 1).trim();
+						if (!kw || !rp) {
+							out = { text: '❌ 关键词和回复内容不能为空' };
+							reenter();
+						} else {
+							const reps = await getAutoReplies(env);
+							const ex = reps.findIndex(r => String(r.keyword || '').toLowerCase() === kw.toLowerCase());
+							if (ex >= 0) { reps[ex].reply = rp; } else { reps.push({ keyword: kw, reply: rp }); }
+							await saveAutoReplies(env, reps);
+							out = { text: '✅ 已保存自动回复\n\n<b>关键词:</b> <code>' + escapeHtml(kw) + '</code>\n<b>回复:</b> ' + escapeHtml(rp) };
+						}
+					}
+				} else if (act === 'grpadd') {
+					if (!/^\d+$/.test(val)) {
+						out = { text: '❌ 请输入纯数字群 ID\n\n例：<code>1004454341974</code>' };
+						reenter();
+					} else {
+						const r = await addGroupId(env, val);
+						out = { text: (r.ok ? '✅' : '❌') + ' ' + escapeHtml(r.msg) +
+							'\n\n群 ID：<code>' + escapeHtml(val) + '</code>' };
+					}
+				}
+				if (!out) { out = { text: '❌ 未知操作' }; }
+				const backLabel = {
+					banadd: '⬅️ 返回黑名单', query: '⬅️ 返回面板', faqadd: '⬅️ 返回 FAQ',
+					aradd: '⬅️ 返回自动回复', grpadd: '⬅️ 返回群 ID 管理'
+				}[act] || '⬅️ 返回';
+				let finalMarkup = out.markup;
+				if (!finalMarkup) {
+					finalMarkup = { inline_keyboard: [[{ text: backLabel, callback_data: 'pnl:' + piPend.back }]] };
+				}
+				try {
+					await editMessageText(piPend.chatId, piPend.panelMsgId, out.text, finalMarkup);
+				} catch (e) {
+					console.error('[面板输入] 刷新失败:', e.message);
+					try { await sendTelegramMessage(piPend.chatId, out.text, finalMarkup); } catch (_) {}
 				}
 				try { await deleteMessage(chatId, message.message_id); } catch (_) {}
 				return;
@@ -7088,6 +7175,18 @@ const pendingWordAdd = new Map();
 // 等待用户输入 AI 配置的会话状态：userId -> { chatId, panelMsgId, field, at }
 const pendingAiEdit = new Map();
 
+// 通用输入态: 封禁/查询用户、添加FAQ、添加自动回复、添加群ID
+// userId -> { chatId, panelMsgId, action, back, at }
+const pendingPanelInput = new Map();
+
+// 构造面板输入提示文案
+function buildPanelInputPrompt(title, fmt) {
+	return '<b>' + title + '</b>\n\n<b>格式：</b>\n<code>' + fmt + '</code>\n\n' +
+		'<b>直接发送内容即可</b>（5 分钟内有效，不用回复）\n' +
+		'格式不对会提示重填，不用退回点按钮。';
+}
+
+
 // 渲染 AI 接入配置面板（aiconfig 分支与保存后刷新共用）
 function buildAiConfigPanel(env, note) {
 	const cur = (typeof env.GET_AI_ENDPOINT === 'function' ? env.GET_AI_ENDPOINT() : null) || {};
@@ -7141,12 +7240,12 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				inline_keyboard: [
 					[{ text: '📊 概览统计', callback_data: 'pnl:overview' }, { text: '⚙️ Bot 设置', callback_data: 'pnl:settings' }],
 					[{ text: '🚫 违禁词管理', callback_data: 'pnl:words' }, { text: '⚠️ 警告记录', callback_data: 'pnl:warnings' }],
-					[{ text: '📋 联网黑名单', callback_data: 'pnl:blacklist' }, { text: '💬 自动回复', callback_data: 'pnl:autoreply' }],
-				[{ text: '🤖 AI 智能功能', callback_data: 'pnl:ai' }],
-					[{ text: '👥 群 ID 管理', callback_data: 'pnl:groups' }]
+					[{ text: '📋 联网黑名单', callback_data: 'pnl:blacklist' }, { text: '🔍 查询用户', callback_data: 'pnl:query' }],
+					[{ text: '💬 自动回复', callback_data: 'pnl:autoreply' }, { text: '👥 群 ID 管理', callback_data: 'pnl:groups' }],
+					[{ text: '🤖 AI 智能功能', callback_data: 'pnl:ai' }]
 				]
 			};
-			const msg = '🎛 <b>管理面板</b>\n\n点击按钮管理群组';
+			const msg = '🎛 <b>管理面板</b>\n\n所有功能都在按钮里，不用记命令。';
 			if (message) await editMessageText(chatId, message.message_id, msg, markup);
 			else await sendTelegramMessage(chatId, msg, markup);
 			try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
@@ -7183,7 +7282,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			bannedWordsConfig = config;
 			const rules = await getWordRules(env);
 			let wordList = words.length === 0
-				? '暂无违禁词，使用 /addwords 添加'
+				? '暂无违禁词，点击下方「➕ 添加违禁词」'
 				: words.map((w, i) => {
 					const isExact = w.startsWith('"') && w.endsWith('"');
 					const label = isExact ? '精确' : '包含';
@@ -7201,8 +7300,8 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				}).join('\n');
 			const msg = '🚫 <b>违禁词管理</b>\n\n' +
 				'<b>违禁词列表:</b>\n' + wordList + '\n\n' +
-				'💡 点击下方按钮可设置单个违禁词规则\n' +
-				'添加: /addwords 词1,词2  删除: /delwords 词';
+				'💡 点 <b>⚙️</b> 设置单个词规则\n' +
+				'💡 添加 / 删除用下方按钮';
 			const buttons = [];
 			// 每个违禁词一个设置按钮
 			if (words.length > 0) {
@@ -7240,8 +7339,15 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					return name + ' (<code>' + u.tgid + '</code>) - ⚠️ ' + u.word_warnings + '/' + WORD_WARNING_LIMIT;
 				}).join('\n');
 			}
-			const msg = '⚠️ <b>警告记录</b>\n\n' + userList + '\n\n清除全部: /clearwarn\n清除单个: /clearwarn &lt;用户ID&gt;';
-			const markup = { inline_keyboard: [backButton] };
+			const msg = '⚠️ <b>警告记录</b>\n\n' + userList +
+				(rows.length > 0 ? '\n\n点 ✖️ 按钮清除单个用户' : '');
+			const wb = [[{ text: '🧹 清除全部警告', callback_data: 'pnl:warnall' }]];
+			for (const u of rows) {
+				const nm = u.username ? '@' + u.username : (u.first_name || u.tgid);
+				wb.push([{ text: '✖️ 清除 ' + nm, callback_data: 'pnl:warnone:' + u.tgid }]);
+			}
+			wb.push(backButton);
+			const markup = { inline_keyboard: wb };
 			if (message) await editMessageText(chatId, message.message_id, msg, markup);
 			else await sendTelegramMessage(chatId, msg, markup);
 			try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
@@ -7262,8 +7368,15 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					return name + ' (<code>' + u.tgid + '</code>)\n原因: ' + (u.ban_reason || '-') + '\n时间: ' + time;
 				}).join('\n---\n');
 			}
-			const msg = '📋 <b>联网黑名单</b> (' + rows.length + '人)\n\n' + userList;
-			const markup = { inline_keyboard: [backButton] };
+			const msg = '📋 <b>联网黑名单</b> (' + rows.length + '人)\n\n' + userList +
+				(rows.length > 0 ? '\n\n点 ✅ 按钮移出黑名单' : '');
+			const bb = [[{ text: '➕ 封禁用户', callback_data: 'pnl:banadd' }, { text: '🔍 查询用户', callback_data: 'pnl:query' }]];
+			for (const u of rows) {
+				const nm = u.username ? '@' + u.username : (u.first_name || u.tgid);
+				bb.push([{ text: '✅ 移出黑名单 ' + nm, callback_data: 'pnl:banun:' + u.tgid }]);
+			}
+			bb.push(backButton);
+			const markup = { inline_keyboard: bb };
 			if (message) await editMessageText(chatId, message.message_id, msg, markup);
 			else await sendTelegramMessage(chatId, msg, markup);
 			try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
@@ -7298,8 +7411,9 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				{ text: (config.summaryHour === 23 ? '🔘' : '⚪') + ' 23:00', callback_data: 'pnl:aihr:23' },
 				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
 			],
-			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			[{ text: '💬 FAQ 管理', callback_data: 'pnl:faq' }],
 			[{ text: '🔑 配置 API', callback_data: 'pnl:aiconfig' }],
+			[{ text: '📋 立即生成今日摘要', callback_data: 'pnl:sumnow' }],
 			backButton
 		];
 		const markup = { inline_keyboard: buttons };
@@ -7340,8 +7454,9 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				{ text: (config.summaryHour === 23 ? '🔘' : '⚪') + ' 23:00', callback_data: 'pnl:aihr:23' },
 				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
 			],
-			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			[{ text: '💬 FAQ 管理', callback_data: 'pnl:faq' }],
 			[{ text: '🔑 配置 API', callback_data: 'pnl:aiconfig' }],
+			[{ text: '📋 立即生成今日摘要', callback_data: 'pnl:sumnow' }],
 			backButton
 		];
 		const markup = { inline_keyboard: buttons };
@@ -7382,8 +7497,9 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				{ text: (config.summaryHour === 23 ? '🔘' : '⚪') + ' 23:00', callback_data: 'pnl:aihr:23' },
 				{ text: (config.summaryHour === 0 ? '🔘' : '⚪') + ' 00:00', callback_data: 'pnl:aihr:0' }
 			],
-			[{ text: '💬 FAQ管理 (/addfaq /delfaq /listfaq)', callback_data: 'pnl:faq' }],
+			[{ text: '💬 FAQ 管理', callback_data: 'pnl:faq' }],
 			[{ text: '🔑 配置 API', callback_data: 'pnl:aiconfig' }],
+			[{ text: '📋 立即生成今日摘要', callback_data: 'pnl:sumnow' }],
 			backButton
 		];
 		const markup = { inline_keyboard: buttons };
@@ -7464,12 +7580,19 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 		const faqs = await getFaqs(env);
 		let faqList;
 		if (faqs.length === 0) {
-			faqList = '暂无FAQ\n使用 /addfaq 问题 | 答案 添加';
+			faqList = '暂无 FAQ，点击下方「➕ 添加 FAQ」';
 		} else {
 			faqList = faqs.map((f, i) => `${i + 1}. Q: ${escapeHtml(f.question)}\n   A: ${escapeHtml(f.answer)}`).join('\n\n');
 		}
-		const msg = '💬 <b>FAQ管理</b> (' + faqs.length + '条)\n\n' + faqList;
-		const buttons = [backButton];
+		const msg = '💬 <b>FAQ 管理</b> (' + faqs.length + '条)\n\n' + faqList +
+			(faqs.length > 0 ? '\n\n点 🗑 按钮删除' : '');
+		const buttons = [[{ text: '➕ 添加 FAQ', callback_data: 'pnl:faqadd' }]];
+		for (let i = 0; i < faqs.length; i++) {
+			const q = faqs[i].question || '';
+			const label = q.length > 8 ? q.slice(0, 8) + '…' : q;
+			buttons.push([{ text: '🗑 删除 #' + (i + 1) + ' ' + label, callback_data: 'pnl:faqdel:' + i }]);
+		}
+		buttons.push(backButton);
 		const markup = { inline_keyboard: buttons };
 		if (message) await editMessageText(chatId, message.message_id, msg, markup);
 		else await sendTelegramMessage(chatId, msg, markup);
@@ -7766,8 +7889,8 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				}).join('\n');
 			const msg = '🚫 <b>违禁词管理</b>\n\n' +
 				'<b>违禁词列表:</b>\n' + wordList + '\n\n' +
-				'💡 点击下方按钮可设置单个违禁词规则\n' +
-				'添加: /addwords 词1,词2  删除: /delwords 词';
+				'💡 点 <b>⚙️</b> 设置单个词规则\n' +
+				'💡 添加 / 删除用下方按钮';
 			const buttons = [];
 			// 每个违禁词一个设置按钮
 			const markup = { inline_keyboard: buttons };
@@ -7777,17 +7900,196 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			return true;
 		}
 
+	// 查询用户封禁状态（原 /check）
+	if (action === 'query') {
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.set(String(userId), { chatId, panelMsgId: message.message_id, action: 'query', back: 'main', at: Date.now() });
+		const qm = { inline_keyboard: [[{ text: '✖️ 取消', callback_data: 'pnl:main' }]] };
+		try { await editMessageText(chatId, message.message_id, buildPanelInputPrompt('🔍 查询用户封禁状态', '123456789'), qm); } catch (_) {}
+		try { await answerCallbackQuery(callbackQuery.id, '请发送用户 ID'); } catch (_) {}
+		return true;
+	}
+
+	// 封禁用户：进入输入态（原 /ban）
+	if (action === 'banadd') {
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.set(String(userId), { chatId, panelMsgId: message.message_id, action: 'banadd', back: 'blacklist', at: Date.now() });
+		const bm0 = { inline_keyboard: [[{ text: '✖️ 取消', callback_data: 'pnl:blacklist' }]] };
+		try { await editMessageText(chatId, message.message_id, buildPanelInputPrompt('🔨 封禁用户', '123456789'), bm0); } catch (_) {}
+		try { await answerCallbackQuery(callbackQuery.id, '请发送用户 ID'); } catch (_) {}
+		return true;
+	}
+
+	// 移出黑名单
+	if (action === 'banun') {
+		const t = parts[2];
+		if (!t) { try { await answerCallbackQuery(callbackQuery.id, '参数错误', true); } catch (_) {} return true; }
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.delete(String(userId));
+		const res = await removeFromBlacklist(t, env, userId);
+		const ok = res && (res.success || res.ok);
+		try { await answerCallbackQuery(callbackQuery.id, ok ? '✅ 已移出' : '❌ 失败', !ok); } catch (_) {}
+		const bt = (ok ? '✅ 已移出黑名单' : '❌ 移出失败') +
+			'\n\n用户：<code>' + escapeHtml(t) + '</code>' +
+			(ok && res && res.message ? '\n\n' + escapeHtml(res.message) : '');
+		const bm = { inline_keyboard: [[{ text: '⬅️ 返回黑名单', callback_data: 'pnl:blacklist' }], backButton] };
+		try { await editMessageText(chatId, message.message_id, bt, bm); } catch (_) {
+			await sendTelegramMessage(chatId, bt, bm);
+		}
+		return true;
+	}
+
+	// 清除全部警告（原 /clearwarn）
+	if (action === 'warnall') {
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.delete(String(userId));
+		const wr = await env.DB.prepare('SELECT COUNT(*) as c FROM users WHERE word_warnings > 0').bind().first();
+		const n = wr && wr.c || 0;
+		await env.DB.prepare('UPDATE users SET word_warnings = 0').run();
+		try { await answerCallbackQuery(callbackQuery.id, '✅ 已清除全部警告'); } catch (_) {}
+		const wt = '🧹 <b>警告已全部清除</b>\n\n受影响用户：<b>' + n + '</b> 人';
+		const wm = { inline_keyboard: [[{ text: '⬅️ 返回警告记录', callback_data: 'pnl:warnings' }], backButton] };
+		try { await editMessageText(chatId, message.message_id, wt, wm); } catch (_) {
+			await sendTelegramMessage(chatId, wt, wm);
+		}
+		return true;
+	}
+
+	// 清除单个用户警告
+	if (action === 'warnone') {
+		const t = parts[2];
+		if (!t || !/^\d+$/.test(t)) { try { await answerCallbackQuery(callbackQuery.id, '参数错误', true); } catch (_) {} return true; }
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.delete(String(userId));
+		const old = await getUserWarnings(env, t);
+		await setUserWarnings(env, t, 0);
+		try { await answerCallbackQuery(callbackQuery.id, '✅ 已清除'); } catch (_) {}
+		const wt2 = '✅ 已清除用户警告\n\n用户：<code>' + escapeHtml(t) + '</code>\n原警告：<b>' + old + '</b> → <b>0</b>';
+		const wm2 = { inline_keyboard: [[{ text: '⬅️ 返回警告记录', callback_data: 'pnl:warnings' }], backButton] };
+		try { await editMessageText(chatId, message.message_id, wt2, wm2); } catch (_) {
+			await sendTelegramMessage(chatId, wt2, wm2);
+		}
+		return true;
+	}
+
+	// 添加 FAQ：进入输入态（原 /addfaq）
+	if (action === 'faqadd') {
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.set(String(userId), { chatId, panelMsgId: message.message_id, action: 'faqadd', back: 'faq', at: Date.now() });
+		const qm2 = { inline_keyboard: [[{ text: '✖️ 取消', callback_data: 'pnl:faq' }]] };
+		try { await editMessageText(chatId, message.message_id, buildPanelInputPrompt('➕ 添加 FAQ', '问题 | 答案'), qm2); } catch (_) {}
+		try { await answerCallbackQuery(callbackQuery.id, '请发送 问题 | 答案'); } catch (_) {}
+		return true;
+	}
+
+	// 删除 FAQ
+	if (action === 'faqdel') {
+		const i = parseInt(parts[2]);
+		const faqs = await getFaqs(env);
+		if (isNaN(i) || i < 0 || i >= faqs.length) { try { await answerCallbackQuery(callbackQuery.id, 'FAQ 不存在', true); } catch (_) {} return true; }
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.delete(String(userId));
+		const rem = faqs.splice(i, 1)[0];
+		await saveFaqs(env, faqs);
+		try { await answerCallbackQuery(callbackQuery.id, '✅ 已删除 #' + (i + 1)); } catch (_) {}
+		const ft = '✅ 已删除 FAQ #' + (i + 1) + '\n\n<b>Q:</b> ' + escapeHtml(rem.question || '') + '\n<b>A:</b> ' + escapeHtml(rem.answer || '') +
+			'\n\n剩余：<b>' + faqs.length + '</b> 条';
+		const fb = [[{ text: '➕ 继续添加', callback_data: 'pnl:faqadd' }],
+			[{ text: '⬅️ 返回 FAQ', callback_data: 'pnl:faq' }], backButton];
+		const fm = { inline_keyboard: fb };
+		try { await editMessageText(chatId, message.message_id, ft, fm); } catch (_) {
+			await sendTelegramMessage(chatId, ft, fm);
+		}
+		return true;
+	}
+
+	// 添加自动回复：进入输入态（原 /autoreply）
+	if (action === 'aradd') {
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.set(String(userId), { chatId, panelMsgId: message.message_id, action: 'aradd', back: 'autoreply', at: Date.now() });
+		const qm3 = { inline_keyboard: [[{ text: '✖️ 取消', callback_data: 'pnl:autoreply' }]] };
+		try { await editMessageText(chatId, message.message_id, buildPanelInputPrompt('➕ 添加自动回复', '关键词=回复内容'), qm3); } catch (_) {}
+		try { await answerCallbackQuery(callbackQuery.id, '请发送 关键词=回复内容'); } catch (_) {}
+		return true;
+	}
+
+	// 删除自动回复
+	if (action === 'ardel') {
+		const i = parseInt(parts[2]);
+		const reps = await getAutoReplies(env);
+		if (isNaN(i) || i < 0 || i >= reps.length) { try { await answerCallbackQuery(callbackQuery.id, '不存在', true); } catch (_) {} return true; }
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.delete(String(userId));
+		const rem = reps.splice(i, 1)[0];
+		await saveAutoReplies(env, reps);
+		try { await answerCallbackQuery(callbackQuery.id, '✅ 已删除'); } catch (_) {}
+		const atx = '✅ 已删除自动回复\n\n<b>关键词:</b> <code>' + escapeHtml(rem.keyword || '') + '</code>\n<b>回复:</b> ' + escapeHtml(rem.reply || '') +
+			'\n\n剩余：<b>' + reps.length + '</b> 条';
+		const arb = [[{ text: '➕ 继续添加', callback_data: 'pnl:aradd' }],
+			[{ text: '⬅️ 返回自动回复', callback_data: 'pnl:autoreply' }], backButton];
+		const alm = { inline_keyboard: arb };
+		try { await editMessageText(chatId, message.message_id, atx, alm); } catch (_) {
+			await sendTelegramMessage(chatId, atx,alm);
+		}
+		return true;
+	}
+
+	// 添加群 ID：进入输入态（原 /addgroup）
+	if (action === 'grpadd') {
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.set(String(userId), { chatId, panelMsgId: message.message_id, action: 'grpadd', back: 'groups', at: Date.now() });
+		const qm4 = { inline_keyboard: [[{ text: '✖️ 取消', callback_data: 'pnl:groups' }]] };
+		try { await editMessageText(chatId, message.message_id, buildPanelInputPrompt('➕ 添加群 ID', '1004454341974'), qm4); } catch (_) {}
+		try { await answerCallbackQuery(callbackQuery.id, '请发送群 ID'); } catch (_) {}
+		return true;
+	}
+
+	// 立即生成今日摘要（原 /summary）
+	if (action === 'sumnow') {
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.delete(String(userId));
+		const sbm = { inline_keyboard: [backButton] };
+		try { await editMessageText(chatId, message.message_id, '⏳ <b>正在生成今日摘要</b>\n\nAI 分析中，请稍候…', sbm); } catch (_) {}
+		try { await answerCallbackQuery(callbackQuery.id, '⏳ 正在生成摘要…'); } catch (_) {}
+		try {
+			const scfg = await getAiConfig(env);
+			try {
+				if (isDbReady(env)) {
+					await env.DB.prepare('DELETE FROM schema_meta WHERE key = ?').bind(AI_LAST_SUMMARY_KEY).run();
+				}
+			} catch (e) { console.error('[AI] 清除摘要记录失败:', e.message); }
+			await generateDailySummary(env, scfg);
+			const okT = '✅ <b>今日摘要已发送到群聊</b>';
+			try { await editMessageText(chatId, message.message_id, okT, sbm); } catch (_) {
+				await sendTelegramMessage(chatId, okT, sbm);
+			}
+		} catch (e) {
+			console.error('[AI] 手动摘要失败:', e.message);
+			const errT = '❌ 摘要生成失败：' + escapeHtml(e.message);
+			try { await editMessageText(chatId, message.message_id, errT, sbm); } catch (_) {
+				await sendTelegramMessage(chatId, errT, sbm);
+			}
+		}
+		return true;
+	}
+
 		// 自动回复管理
 		if (action === 'autoreply') {
 			const replies = await getAutoReplies(env);
 			let replyList;
 			if (replies.length === 0) {
-				replyList = '暂无自动回复';
+				replyList = '暂无自动回复，点击下方「➕ 添加」';
 			} else {
 				replyList = replies.map((r, i) => `${i + 1}. <code>${escapeHtml(r.keyword)}</code> → ${r.reply}`).join('\n');
 			}
-			const msg = '💬 <b>自动回复管理</b> (' + replies.length + '条)\n\n' + replyList + '\n\n添加: /autoreply 关键词=回复内容\n删除: /autoreply 关键词';
-			const markup = { inline_keyboard: [backButton] };
+			const msg = '💬 <b>自动回复管理</b> (' + replies.length + '条)\n\n' + replyList +
+			(replies.length > 0 ? '\n\n点 🗑 按钮删除' : '\n\n点下方按钮添加');
+			const ab = [[{ text: '➕ 添加自动回复', callback_data: 'pnl:aradd' }]];
+			for (let i = 0; i < replies.length; i++) {
+			ab.push([{ text: '🗑 ' + (replies[i].keyword || ''), callback_data: 'pnl:ardel:' + i }]);
+			}
+			ab.push(backButton);
+			const markup = { inline_keyboard: ab };
 			if (message) await editMessageText(chatId, message.message_id, msg, markup);
 			else await sendTelegramMessage(chatId, msg, markup);
 			try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
@@ -7800,16 +8102,20 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			const envGroups = String(GROUP_ID || '').split(',').map(s => s.trim()).filter(Boolean);
 			let groupList;
 			if (groups.length === 0) {
-				groupList = '暂无群 ID';
+				groupList = '暂无群 ID，点击下方「➕ 添加群 ID」';
 			} else {
 				groupList = groups.map((gid, i) => {
 					return `${i + 1}. <code>${gid}</code>`;
 				}).join('\n');
 			}
-			const msg = '👥 <b>群 ID 管理</b> (' + groups.length + '个)\n\n' + groupList + '\n\n📌 <b>添加群 ID:</b>\n发送 /addgroup -100xxxxxxxx\n\n📌 <b>删除群 ID:</b>\n发送 /delgroup -100xxxxxxxx\n\n💡 先把 bot 加到新群设为管理员，再用上面命令添加群 ID';
-			const buttons = [];
+			const msg = '👥 <b>群 ID 管理</b> (' + groups.length + '个)\n\n' + groupList +
+				'\n\n💡 点下方 🗑 删除，点「➕ 添加」新增\n💡 先把 bot 加到新群并设为管理员';
+			const buttons = [[{ text: '➕ 添加群 ID', callback_data: 'pnl:grpadd' }]];
 			for (let i = 0; i < groups.length; i++) {
-				buttons.push([{ text: '🗑 删除 ' + groups[i], callback_data: 'pnl:delgrp:' + i }]);
+				const g = groups[i];
+				if (!envGroups.includes(g)) {
+						buttons.push([{ text: '🗑 删除 ' + g, callback_data: 'pnl:delgrp:' + i }]);
+				}
 			}
 			buttons.push(backButton);
 			const markup = { inline_keyboard: buttons };
@@ -7843,7 +8149,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				}).join('\n');
 			}
 			const envGroupsList = String(GROUP_ID || '').split(',').map(s => s.trim()).filter(Boolean);
-			const msg2 = '👥 <b>群 ID 管理</b> (' + newGroups.length + '个)\n\n' + newGroupList + '\n\n📌 <b>添加群 ID:</b>\n发送 /addgroup -100xxxxxxxx\n\n📌 <b>删除群 ID:</b>\n发送 /delgroup -100xxxxxxxx\n\n💡 先把 bot 加到新群设为管理员，再用上面命令添加群 ID';
+			const msg2 = '👥 <b>群 ID 管理</b> (' + newGroups.length + '个)\n\n' + newGroupList + '\n\n💡 点下方 🗑 删除，点「➕ 添加」新增';
 			const buttons2 = [];
 			for (let i = 0; i < newGroups.length; i++) {
 				const g = newGroups[i];
@@ -7866,16 +8172,8 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 				'📡 Webhook: <code>https://unban.zhiaon.top/</code>\n' +
 				'🤖 Bot Token: ' + (BOT_TOKEN ? '✅ 已配置' : '❌ 未配置') + '\n' +
 				'🚦 AI 评级: ' + (process.env.DEEPSEEK_API_KEY ? '✅ 已启用' : '❌ 未启用') + '\n\n' +
-				'当前命令:\n' +
-				'/addwords - 添加违禁词\n' +
-				'/delwords - 删除违禁词\n' +
-				'/listwords - 查看违禁词\n' +
-				'/clearwarn - 清除警告\n' +
-				'/warns - 查看警告次数\n' +
-				'/ban - 封禁用户\n' +
-				'/unban - 解封用户\n' +
-				'/check - 查询用户\n' +
-				'/spam - 标记广告';
+				'📌 所有管理功能已收进 <code>/panel</code> 面板，全部用按钮操作。\n' +
+				'📌 唯一保留命令：<code>/unban</code>（被封用户自助解封）';
 			const markup = { inline_keyboard: [backButton] };
 			if (message) await editMessageText(chatId, message.message_id, msg, markup);
 			else await sendTelegramMessage(chatId, msg, markup);
