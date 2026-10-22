@@ -484,6 +484,42 @@ async function aiProcessMessage(message, env) {
 }
 
 const GROUP_IDS_KEY = 'group_ids_v1';
+const SUPER_ADMINS_KEY = 'super_admins_v1';
+const SUPER_ADMIN_OWNER = '6155042714'; // 江砚 (最高权限，不可删除)
+
+// 获取超级管理员白名单 (含 owner)
+async function getSuperAdmins(env) {
+	let list = [SUPER_ADMIN_OWNER];
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(SUPER_ADMINS_KEY).first();
+		if (row) { try { const extra = JSON.parse(row.value); if (Array.isArray(extra)) list = [...new Set([SUPER_ADMIN_OWNER, ...extra])]; } catch {} }
+	}
+	return list;
+}
+
+// 保存超级管理员白名单 (不含 owner, owner 始终内置)
+async function saveSuperAdmins(env, extraIds) {
+	const json = JSON.stringify(extraIds.filter(id => id !== SUPER_ADMIN_OWNER));
+	if (isDbReady(env)) {
+		await env.DB.prepare('INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(SUPER_ADMINS_KEY, json).run();
+	}
+	if (env.KV) { await env.KV.put(SUPER_ADMINS_KEY, json); }
+}
+
+// 检查是否为超级管理员
+async function isSuperAdmin(userId, env) {
+	const tgid = String(userId);
+	if (tgid === SUPER_ADMIN_OWNER) return true;
+	let extra = [];
+	if (isDbReady(env)) {
+		const row = await env.DB.prepare('SELECT value FROM schema_meta WHERE key = ?').bind(SUPER_ADMINS_KEY).first();
+		if (row) { try { extra = JSON.parse(row.value); } catch {} }
+	}
+	if (env.KV && extra.length === 0) {
+		try { const raw = await env.KV.get(SUPER_ADMINS_KEY, { type: 'json' }); if (Array.isArray(raw)) extra = raw; } catch {}
+	}
+	return extra.some(id => String(id) === tgid);
+}
 
 // 违禁词配置（运行时可变，存 DB）
 let bannedWordsConfig = {
@@ -1810,6 +1846,9 @@ async function checkIfUserIsAdminInMainGroup(userId, chatId) {
 //   - 其它群 / 异常场景 → 一律 false(不可达指令由调用方既有守卫先行拦截,不抛错)。
 // 主群群内判定复用 getMainGroupAdminSet(chatId)(60s 名单缓存),不放大 Telegram API 配额。
 async function checkCommandAdmin(userId, message) {
+	// 超级管理员白名单优先 (不再依赖群管理员身份)
+	const env = (typeof globalThis !== 'undefined' && globalThis.__botEnv) || null;
+	if (env && await isSuperAdmin(userId, env)) return true;
 	if (!message || !message.chat) return false;
 	const chat = message.chat;
 	if (chat.type === 'private') {
@@ -2964,6 +3003,7 @@ async function handleNewChatMemberBots(message, env) {
 }
 
 async function handleMessage(message, env) {
+	globalThis.__botEnv = env;
 	if (await handleNewChatMemberBots(message, env)) {
 		return;
 	}
@@ -3079,7 +3119,22 @@ async function handleMessage(message, env) {
 							out = { text: '✅ 已保存自动回复\n\n<b>关键词:</b> <code>' + escapeHtml(kw) + '</code>\n<b>回复:</b> ' + escapeHtml(rp) };
 						}
 					}
-				} else if (act === 'grpadd') {
+				} else if (act === 'saadd') {
+				if (!/^\d+$/.test(val)) {
+					out = { text: '❌ 请输入纯数字 TG ID\n\n例：<code>123456789</code>' };
+					reenter();
+				} else {
+					const admins = await getSuperAdmins(env);
+					if (admins.includes(val)) {
+						out = { text: '⚠️ 该用户已在白名单中\n\nTG ID：<code>' + escapeHtml(val) + '</code>' };
+					} else {
+						const extra = admins.filter(a => a !== SUPER_ADMIN_OWNER);
+						extra.push(val);
+						await saveSuperAdmins(env, extra);
+						out = { text: '✅ 已添加白名单成员\n\nTG ID：<code>' + escapeHtml(val) + '</code>' };
+					}
+				}
+			} else if (act === 'grpadd') {
 					if (!/^\d+$/.test(val)) {
 						out = { text: '❌ 请输入纯数字群 ID\n\n例：<code>1004454341974</code>' };
 						reenter();
@@ -3092,7 +3147,7 @@ async function handleMessage(message, env) {
 				if (!out) { out = { text: '❌ 未知操作' }; }
 				const backLabel = {
 					banadd: '⬅️ 返回黑名单', query: '⬅️ 返回面板', faqadd: '⬅️ 返回 FAQ',
-					aradd: '⬅️ 返回自动回复', grpadd: '⬅️ 返回群 ID 管理'
+					aradd: '⬅️ 返回自动回复', grpadd: '⬅️ 返回群 ID 管理', saadd: '⬅️ 返回白名单'
 				}[act] || '⬅️ 返回';
 				let finalMarkup = out.markup;
 				if (!finalMarkup) {
@@ -7230,6 +7285,7 @@ function buildAiConfigPanel(env, note) {
 // 管理面板回调处理 (pnl: 前缀)
 // ========================================================
 async function handlePanelCallbackQuery(callbackQuery, env) {
+	globalThis.__botEnv = env;
 	const data = callbackQuery.data || '';
 	if (!data.startsWith('pnl:')) return false;
 
@@ -7258,7 +7314,8 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 					[{ text: '🚫 违禁词管理', callback_data: 'pnl:words' }, { text: '⚠️ 警告记录', callback_data: 'pnl:warnings' }],
 					[{ text: '📋 联网黑名单', callback_data: 'pnl:blacklist' }, { text: '🔍 查询用户', callback_data: 'pnl:query' }],
 					[{ text: '💬 自动回复', callback_data: 'pnl:autoreply' }, { text: '👥 群 ID 管理', callback_data: 'pnl:groups' }],
-					[{ text: '🤖 AI 智能功能', callback_data: 'pnl:ai' }]
+					[{ text: '🤖 AI 智能功能', callback_data: 'pnl:ai' }],
+					[{ text: '🔐 管理员白名单', callback_data: 'pnl:sadmins' }]
 				]
 			};
 			const msg = '🎛 <b>管理面板</b>\n\n所有功能都在按钮里，不用记命令。';
@@ -8180,7 +8237,68 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			return true;
 		}
 
-		// Bot 设置
+		// 管理员白名单面板
+	if (action === 'sadmins') {
+		const admins = await getSuperAdmins(env);
+		let list = '';
+		for (let i = 0; i < admins.length; i++) {
+			const a = admins[i];
+			const isOwner = a === SUPER_ADMIN_OWNER;
+			list += (i + 1) + '. <code>' + escapeHtml(a) + '</code>' + (isOwner ? ' 👑 (最高权限)' : '') + '\n';
+		}
+		const extra = admins.filter(a => a !== SUPER_ADMIN_OWNER);
+		const msg = '🔐 <b>管理员白名单</b>\n\n' + list + '\n👑 为最高权限，不可删除\n💡 点 ➕ 添加白名单成员';
+		const sb = [[{ text: '➕ 添加白名单成员', callback_data: 'pnl:saadd' }]];
+		for (const a of extra) {
+			sb.push([{ text: '✖️ 删除 ' + a, callback_data: 'pnl:sadel:' + a }]);
+		}
+		sb.push(backButton);
+		const markup = { inline_keyboard: sb };
+		if (message) await editMessageText(chatId, message.message_id, msg, markup);
+		else await sendTelegramMessage(chatId, msg, markup);
+		try { await answerCallbackQuery(callbackQuery.id); } catch (_) {}
+		return true;
+	}
+
+	// 添加白名单成员：进入输入态
+	if (action === 'saadd') {
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.set(String(userId), { chatId, panelMsgId: message.message_id, action: 'saadd', back: 'sadmins', at: Date.now() });
+		const qm = { inline_keyboard: [[{ text: '✖️ 取消', callback_data: 'pnl:sadmins' }]] };
+		try { await editMessageText(chatId, message.message_id, buildPanelInputPrompt('➕ 添加白名单成员', '123456789'), qm); } catch (_) {}
+		try { await answerCallbackQuery(callbackQuery.id, '请发送 TG ID'); } catch (_) {}
+		return true;
+	}
+
+	// 删除白名单成员
+	if (action === 'sadel') {
+		const tid = parts[2];
+		if (!tid || tid === SUPER_ADMIN_OWNER) { try { await answerCallbackQuery(callbackQuery.id, '不可删除', true); } catch (_) {} return true; }
+		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
+		pendingPanelInput.delete(String(userId));
+		const admins = await getSuperAdmins(env);
+		const extra = admins.filter(a => a !== SUPER_ADMIN_OWNER && a !== tid);
+		await saveSuperAdmins(env, extra);
+		try { await answerCallbackQuery(callbackQuery.id, '✅ 已删除'); } catch (_) {}
+		// 刷新面板
+		const newAdmins = await getSuperAdmins(env);
+		let newList = '';
+		for (let i = 0; i < newAdmins.length; i++) {
+			const a = newAdmins[i];
+			const isOwner = a === SUPER_ADMIN_OWNER;
+			newList += (i + 1) + '. <code>' + escapeHtml(a) + '</code>' + (isOwner ? ' 👑 (最高权限)' : '') + '\n';
+		}
+		const newExtra = newAdmins.filter(a => a !== SUPER_ADMIN_OWNER);
+		const wt = '✅ 已删除 <code>' + escapeHtml(tid) + '</code>\n\n🔐 <b>管理员白名单</b>\n\n' + newList;
+		const wb2 = [[{ text: '➕ 添加白名单成员', callback_data: 'pnl:saadd' }]];
+		for (const a of newExtra) { wb2.push([{ text: '✖️ 删除 ' + a, callback_data: 'pnl:sadel:' + a }]); }
+		wb2.push(backButton);
+		const wm = { inline_keyboard: wb2 };
+		try { await editMessageText(chatId, message.message_id, wt, wm); } catch (_) { await sendTelegramMessage(chatId, wt, wm); }
+		return true;
+	}
+
+	// Bot 设置
 		if (action === 'settings') {
 			const msg = '⚙️ <b>Bot 设置</b>\n\n' +
 				'⚠️ 警告上限: <b>' + WORD_WARNING_LIMIT + '</b> 次\n' +
