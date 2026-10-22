@@ -2313,8 +2313,8 @@ async function handleInitialization(request) {
 				{ command: "summary", description: "手动生成今日摘要 (管理员)" },
 				{ command: "setapikey", description: "修改 AI API Key (管理员)" },
 				{ command: "setapiurl", description: "修改 AI API 地址 (管理员)" },
-				{ command: "addadmin", description: "添加白名单成员 (管理员)" },
-				{ command: "deladmin", description: "移除白名单成员 (管理员)" }
+				{ command: "addadmin", description: "添加管理员白名单成员" },
+				{ command: "deladmin", description: "移除管理员白名单成员" }
 			]
 		};
 
@@ -3120,12 +3120,12 @@ async function handleMessage(message, env) {
 				} else {
 					const admins = await getSuperAdmins(env);
 					if (admins.includes(val)) {
-						out = { text: '⚠️ 该用户已在白名单中\n\nTG ID：<code>' + escapeHtml(val) + '</code>' };
+						out = { text: '⚠️ 该用户已在管理员白名单中\n\nTG ID：<code>' + escapeHtml(val) + '</code>' };
 					} else {
 						const extra = admins.filter(a => a !== SUPER_ADMIN_OWNER);
 						extra.push(val);
 						await saveSuperAdmins(env, extra);
-						out = { text: '✅ 已添加白名单成员\n\nTG ID：<code>' + escapeHtml(val) + '</code>' };
+						out = { text: '✅ 已添加管理员白名单成员\n\nTG ID：<code>' + escapeHtml(val) + '</code>' };
 					}
 				}
 			} else if (act === 'grpadd') {
@@ -4233,14 +4233,14 @@ async function handleMessage(message, env) {
 		}
 		const admins = await getSuperAdmins(env);
 		if (admins.includes(targetId)) {
-			await sendTelegramMessage(chatId, '⚠️ 该用户已在白名单中\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
+			await sendTelegramMessage(chatId, '⚠️ 该用户已在管理员白名单中\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
 			return;
 		}
 		const extra = admins.filter(a => a !== SUPER_ADMIN_OWNER);
 		extra.push(targetId);
 		await saveSuperAdmins(env, extra);
 		console.log('[白名单] ' + userId + ' 添加了 ' + targetId);
-		await sendTelegramMessage(chatId, '✅ 已添加白名单成员\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
+		await sendTelegramMessage(chatId, '✅ 已添加管理员白名单成员\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
 		return;
 	}
 
@@ -4260,13 +4260,13 @@ async function handleMessage(message, env) {
 		}
 		const admins = await getSuperAdmins(env);
 		if (!admins.includes(targetId)) {
-			await sendTelegramMessage(chatId, '⚠️ 该用户不在白名单中\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
+			await sendTelegramMessage(chatId, '⚠️ 该用户不在管理员白名单中\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
 			return;
 		}
 		const extra = admins.filter(a => a !== SUPER_ADMIN_OWNER && a !== targetId);
 		await saveSuperAdmins(env, extra);
 		console.log('[白名单] ' + userId + ' 移除了 ' + targetId);
-		await sendTelegramMessage(chatId, '✅ 已移除白名单成员\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
+		await sendTelegramMessage(chatId, '✅ 已移除管理员白名单成员\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
 		return;
 	}
 
@@ -8294,8 +8294,8 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 			list += (i + 1) + '. <code>' + escapeHtml(a) + '</code>' + (isOwner ? ' 👑 (最高权限)' : '') + '\n';
 		}
 		const extra = admins.filter(a => a !== SUPER_ADMIN_OWNER);
-		const msg = '🔐 <b>管理员白名单</b>\n\n' + list + '\n👑 为最高权限，不可删除\n💡 点 ➕ 添加白名单成员';
-		const sb = [[{ text: '➕ 添加白名单成员', callback_data: 'pnl:saadd' }]];
+		const msg = '🔐 <b>管理员白名单</b>\n\n' + list + '\n👑 为最高权限，不可删除\n💡 点 ➕ 添加管理员白名单成员';
+		const sb = [[{ text: '➕ 添加管理员白名单成员', callback_data: 'pnl:saadd' }]];
 		for (const a of extra) {
 			sb.push([{ text: '✖️ 删除 ' + a, callback_data: 'pnl:sadel:' + a }]);
 		}
@@ -8312,7 +8312,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 		if (!message) { try { await answerCallbackQuery(callbackQuery.id, '请先发 /panel', true); } catch (_) {} return true; }
 		pendingPanelInput.set(String(userId), { chatId, panelMsgId: message.message_id, action: 'saadd', back: 'sadmins', at: Date.now() });
 		const qm = { inline_keyboard: [[{ text: '✖️ 取消', callback_data: 'pnl:sadmins' }]] };
-		try { await editMessageText(chatId, message.message_id, buildPanelInputPrompt('➕ 添加白名单成员', '123456789'), qm); } catch (_) {}
+		try { await editMessageText(chatId, message.message_id, buildPanelInputPrompt('➕ 添加管理员白名单成员', '123456789'), qm); } catch (_) {}
 		try { await answerCallbackQuery(callbackQuery.id, '请发送 TG ID'); } catch (_) {}
 		return true;
 	}
@@ -8337,7 +8337,7 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 		}
 		const newExtra = newAdmins.filter(a => a !== SUPER_ADMIN_OWNER);
 		const wt = '✅ 已删除 <code>' + escapeHtml(tid) + '</code>\n\n🔐 <b>管理员白名单</b>\n\n' + newList;
-		const wb2 = [[{ text: '➕ 添加白名单成员', callback_data: 'pnl:saadd' }]];
+		const wb2 = [[{ text: '➕ 添加管理员白名单成员', callback_data: 'pnl:saadd' }]];
 		for (const a of newExtra) { wb2.push([{ text: '✖️ 删除 ' + a, callback_data: 'pnl:sadel:' + a }]); }
 		wb2.push(backButton);
 		const wm = { inline_keyboard: wb2 };
