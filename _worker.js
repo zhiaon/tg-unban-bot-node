@@ -2312,7 +2312,9 @@ async function handleInitialization(request) {
 				{ command: "autoreply", description: "管理自动回复 (管理员)" },
 				{ command: "summary", description: "手动生成今日摘要 (管理员)" },
 				{ command: "setapikey", description: "修改 AI API Key (管理员)" },
-				{ command: "setapiurl", description: "修改 AI API 地址 (管理员)" }
+				{ command: "setapiurl", description: "修改 AI API 地址 (管理员)" },
+				{ command: "addadmin", description: "添加白名单成员 (管理员)" },
+				{ command: "deladmin", description: "移除白名单成员 (管理员)" }
 			]
 		};
 
@@ -4213,6 +4215,59 @@ async function handleMessage(message, env) {
 			await sendTelegramMessage(chatId, responseMessage);
 			return;
 		}
+	}
+
+	// /addadmin — 添加白名单成员 (回复消息或带 TG ID)
+	const addAdminCmd = parseCommand(text, 'addadmin');
+	if (addAdminCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		const targetId = getCommandTargetUserId(addAdminCmd, message);
+		if (!targetId) {
+			await sendTelegramMessage(chatId, '❌ 使用方法:\n<code>/addadmin 用户ID</code>\n或回复用户消息发送 <code>/addadmin</code>', null, null, true);
+			return;
+		}
+		if (!/^\d+$/.test(targetId)) {
+			await sendTelegramMessage(chatId, '❌ 用户 ID 必须是数字', null, null, true);
+			return;
+		}
+		const admins = await getSuperAdmins(env);
+		if (admins.includes(targetId)) {
+			await sendTelegramMessage(chatId, '⚠️ 该用户已在白名单中\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
+			return;
+		}
+		const extra = admins.filter(a => a !== SUPER_ADMIN_OWNER);
+		extra.push(targetId);
+		await saveSuperAdmins(env, extra);
+		console.log('[白名单] ' + userId + ' 添加了 ' + targetId);
+		await sendTelegramMessage(chatId, '✅ 已添加白名单成员\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
+		return;
+	}
+
+	// /deladmin — 移除白名单成员 (回复消息或带 TG ID)
+	const delAdminCmd = parseCommand(text, 'deladmin');
+	if (delAdminCmd) {
+		if (!isPrivateOrManagedGroup(message)) return;
+		if (!(await checkCommandAdmin(userId, message))) return;
+		const targetId = getCommandTargetUserId(delAdminCmd, message);
+		if (!targetId) {
+			await sendTelegramMessage(chatId, '❌ 使用方法:\n<code>/deladmin 用户ID</code>\n或回复用户消息发送 <code>/deladmin</code>', null, null, true);
+			return;
+		}
+		if (targetId === SUPER_ADMIN_OWNER) {
+			await sendTelegramMessage(chatId, '❌ 最高权限不可移除', null, null, true);
+			return;
+		}
+		const admins = await getSuperAdmins(env);
+		if (!admins.includes(targetId)) {
+			await sendTelegramMessage(chatId, '⚠️ 该用户不在白名单中\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
+			return;
+		}
+		const extra = admins.filter(a => a !== SUPER_ADMIN_OWNER && a !== targetId);
+		await saveSuperAdmins(env, extra);
+		console.log('[白名单] ' + userId + ' 移除了 ' + targetId);
+		await sendTelegramMessage(chatId, '✅ 已移除白名单成员\nTG ID: <code>' + escapeHtml(targetId) + '</code>', null, null, true);
+		return;
 	}
 
 	// 处理 /start 和 /unban 命令 - 显示欢迎消息
