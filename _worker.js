@@ -1846,17 +1846,9 @@ async function checkIfUserIsAdminInMainGroup(userId, chatId) {
 //   - 其它群 / 异常场景 → 一律 false(不可达指令由调用方既有守卫先行拦截,不抛错)。
 // 主群群内判定复用 getMainGroupAdminSet(chatId)(60s 名单缓存),不放大 Telegram API 配额。
 async function checkCommandAdmin(userId, message) {
-	// 超级管理员白名单优先 (不再依赖群管理员身份)
+	// 只有白名单成员可用管理功能，群管理员不再自动获得权限
 	const env = (typeof globalThis !== 'undefined' && globalThis.__botEnv) || null;
 	if (env && await isSuperAdmin(userId, env)) return true;
-	if (!message || !message.chat) return false;
-	const chat = message.chat;
-	if (chat.type === 'private') {
-		return await checkIfUserIsAdminInAnyMainGroup(userId);
-	}
-	if (isMainGroup(chat.id)) {
-		return await checkIfUserIsAdminInMainGroup(userId, chat.id);
-	}
 	return false;
 }
 
