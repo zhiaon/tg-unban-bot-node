@@ -2171,7 +2171,7 @@ export default {
 						if (!consumed2) {
 							const consumed3 = await handleBannedWordCallbackQuery(update.callback_query, env);
 							if (!consumed3) {
-								const consumed4 = await handlePanelCallbackQuery(update.callback_query, env);
+								const consumed4 = await handlePanelCallbackQuery(update.callback_query, env); console.log("[callback] pnl consumed:", consumed4, "data:", update.callback_query.data);
 								if (!consumed4) {
 									await handleAdCallbackQuery(update.callback_query, env);
 								}
@@ -2266,8 +2266,22 @@ async function handleInitialization(request) {
 		const setCommandsUrl = `https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`;
 		const setCommandsBody = {
 			commands: [
+				{ command: "unban", description: "开始自助解封" },
 				{ command: "panel", description: "管理面板 (管理员)" },
-				{ command: "unban", description: "开始自助解封" }
+				{ command: "ban", description: "添加用户到黑名单 (管理员)" },
+				{ command: "check", description: "查询用户封禁状态 (管理员)" },
+				{ command: "addwords", description: "添加违禁词 (管理员)" },
+				{ command: "delwords", description: "删除违禁词 (管理员)" },
+				{ command: "listwords", description: "查看所有违禁词 (管理员)" },
+				{ command: "clearwarn", description: "清除违禁词警告 (管理员)" },
+				{ command: "warns", description: "查看用户警告次数 (管理员)" },
+				{ command: "addfaq", description: "添加FAQ问答 (管理员)" },
+				{ command: "delfaq", description: "删除FAQ问答 (管理员)" },
+				{ command: "listfaq", description: "查看FAQ列表 (管理员)" },
+				{ command: "autoreply", description: "管理自动回复 (管理员)" },
+				{ command: "summary", description: "手动生成今日摘要 (管理员)" },
+				{ command: "setapikey", description: "修改 AI API Key (管理员)" },
+				{ command: "setapiurl", description: "修改 AI API 地址 (管理员)" }
 			]
 		};
 
@@ -7224,6 +7238,8 @@ async function handlePanelCallbackQuery(callbackQuery, env) {
 	const userId = callbackQuery.from.id;
 	const parts = data.split(':');
 	const action = parts[1];
+	console.log('[PANEL] action=' + action + ', chatId=' + chatId + ', msgId=' + (message?.message_id) + ', userId=' + userId);
+	console.log('[PANEL] 收到回调: action=', action, 'data=', data, 'chatId=', chatId, 'userId=', userId, 'messageId=', message?.message_id);
 
 	// 仅管理员可操作
 	if (!await checkCommandAdmin(userId, { chat: { id: chatId, type: message?.chat?.type } })) {
